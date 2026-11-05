@@ -11,6 +11,8 @@ storage:
       db_name:
         env: DAGSTER_PG_DB
       port: 5432
+      # SQLAlchemy 2.1 defaults postgresql:// to psycopg 3, but dagster-postgres is built on psycopg2.
+      scheme: postgresql+psycopg2
 
 # Runs are queued and launched by the daemon, so the Spark driver always lives in the
 # dagster-daemon container (spark.driver.host=dagster-daemon in UAT).
