@@ -83,6 +83,15 @@ services:
     <<: *dagster
     ports:
       - "3000:3000" # Dagster UI
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:3000/server_info')"
+      interval: 5s
+      start_period: 30s
+      retries: 24
 
   dagster-daemon:
     <<: *dagster
