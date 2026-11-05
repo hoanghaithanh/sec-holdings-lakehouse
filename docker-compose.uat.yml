@@ -1,5 +1,5 @@
 # UAT override for the homelab: Spark standalone with 1 master and 2 workers.
-# Sized for a 14-core / 64 GB host, leaving headroom for the OS, Postgres and MinIO.
+# Sized for a 14-core / 64 GB host, leaving headroom for the OS, Postgres and the object store.
 # Runs are launched by the daemon, so the Spark driver lives in dagster-daemon (client mode).
 x-spark: &spark
   image: ${LAKEHOUSE_IMAGE:-sec-lakehouse:local}

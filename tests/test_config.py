@@ -17,7 +17,7 @@ def test_uat_reads_object_store_settings() -> None:
             "LAKEHOUSE_ENV": "UAT",
             "SPARK_MASTER": "spark://spark-master:7077",
             "LAKEHOUSE_ROOT": "s3a://lakehouse/",
-            "S3_ENDPOINT": "http://minio:9000",
+            "S3_ENDPOINT": "http://object-store:9000",
             "S3_ACCESS_KEY": "key",
             "S3_SECRET_KEY": "secret",
         }

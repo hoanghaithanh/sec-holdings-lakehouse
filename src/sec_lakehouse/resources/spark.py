@@ -15,7 +15,7 @@ HADOOP_AWS_PACKAGE = "org.apache.hadoop:hadoop-aws:3.3.4"
 
 
 class SparkResource(ConfigurableResource):  # type: ignore[type-arg]
-    """One SparkSession per run, configured for Delta Lake and, optionally, S3/MinIO."""
+    """One SparkSession per run, with Delta Lake and, optionally, S3-compatible storage."""
 
     master: str = "local[*]"
     app_name: str = "sec-lakehouse"

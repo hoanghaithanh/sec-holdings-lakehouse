@@ -9,7 +9,7 @@ with entity resolution for managers and securities.
 ## Architecture (so far)
 
 ```
-Dagster (webserver + daemon) ──► SparkSession (Delta + S3A) ──► MinIO / local disk
+Dagster (webserver + daemon) ──► SparkSession (Delta + S3A) ──► S3 store / local disk
         │                              │                         raw / bronze / silver / gold
         └── Postgres (run + event storage)   └── local[*] in dev, Spark standalone in UAT
 ```
@@ -26,7 +26,7 @@ Everything is driven by environment variables. No code path is specific to one m
 | `LAKEHOUSE_ENV`    | `dev`               | `uat`                       |
 | `SPARK_MASTER`     | `local[*]`          | `spark://spark-master:7077` |
 | `LAKEHOUSE_ROOT`   | `data/lakehouse` or `s3a://lakehouse` | `s3a://lakehouse` |
-| `S3_ENDPOINT`      | `http://minio:9000` (Compose) | `http://minio:9000` |
+| `S3_ENDPOINT`      | `http://object-store:9000` (Compose) | `http://object-store:9000` |
 | `SPARK_EXTRA_CONF` | (empty)             | driver host, executor sizing |
 
 `uat` and `prod` refuse to start unless tables go to an object store, and an `s3a://` root
@@ -48,10 +48,10 @@ uv run dagster dev          # http://localhost:3000, writes to ./data/lakehouse
 
 ```bash
 cp .env.example .env        # then change the passwords
-docker compose up --build   # Dagster UI on :3000, MinIO console on :9001
+docker compose up --build   # Dagster UI on :3000, object store console on :9001
 ```
 
-Open Dagster, select `hello_delta`, and click **Materialize**. The table lands in MinIO at
+Open Dagster, select `hello_delta`, and click **Materialize**. The table lands in the object store (RustFS) at
 `s3a://lakehouse/bronze/hello_delta`.
 
 ### Homelab (uat)

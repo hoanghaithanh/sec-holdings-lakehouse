@@ -20,10 +20,10 @@ def test_spark_conf_local_has_no_s3() -> None:
     assert not any(key.startswith("spark.hadoop.fs.s3a") for key in conf)
 
 
-def test_spark_conf_minio() -> None:
+def test_spark_conf_object_store() -> None:
     conf = SparkResource(
-        s3_endpoint="http://minio:9000", s3_access_key="k", s3_secret_key="s"
+        s3_endpoint="http://object-store:9000", s3_access_key="k", s3_secret_key="s"
     ).spark_conf()
-    assert conf["spark.hadoop.fs.s3a.endpoint"] == "http://minio:9000"
+    assert conf["spark.hadoop.fs.s3a.endpoint"] == "http://object-store:9000"
     assert conf["spark.hadoop.fs.s3a.path.style.access"] == "true"
     assert conf["spark.hadoop.fs.s3a.connection.ssl.enabled"] == "false"

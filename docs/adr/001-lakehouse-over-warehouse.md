@@ -17,7 +17,7 @@ reviewer to clone and run.
    can't run on the homelab, and makes it hard for someone else to reproduce.
 2. **Local warehouse** (Postgres or DuckDB files): simple, but it doesn't scale out and
    doesn't show distributed processing. Raw files and tables would live in separate systems.
-3. **Lakehouse**: open table format on object storage (MinIO / S3), processed by Spark.
+3. **Lakehouse**: open table format on object storage (S3-compatible: RustFS locally, S3 or ADLS in the cloud), processed by Spark.
 
 ## Decision
 
@@ -32,7 +32,7 @@ orchestrated by Dagster**, in a raw / bronze / silver / gold layout.
   and with "what did we know as of quarter X" questions.
 - **Same storage for raw files and tables.** Raw filings are kept immutable next to the Delta
   tables built from them, so any layer can be rebuilt.
-- **Portable.** MinIO in dev and UAT, S3 or ADLS in an optional cloud prod, with no code changes.
+- **Portable.** An S3-compatible store (RustFS) in dev and UAT, S3 or ADLS in an optional cloud prod, with no code changes.
 - **Open readers.** Gold tables can be served with DuckDB's delta extension, with no Spark at
   query time.
 
@@ -41,5 +41,5 @@ orchestrated by Dagster**, in a raw / bronze / silver / gold layout.
 - Spark is heavy locally, so dev uses 1 to 2 years of data and full backfills run on the homelab.
 - Delta tables need upkeep: `OPTIMIZE` and a scheduled `VACUUM`, plus disk headroom
   (about 100 GB) for version history.
-- More moving parts than a single database (Spark, MinIO, Postgres for Dagster). Docker Compose
+- More moving parts than a single database (Spark, an object store, Postgres for Dagster). Docker Compose
   and one shared image keep this manageable.
