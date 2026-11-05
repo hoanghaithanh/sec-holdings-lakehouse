@@ -1,0 +1,40 @@
+# UAT override for the homelab: Spark standalone with 1 master and 2 workers.
+# Sized for a 14-core / 64 GB host, leaving headroom for the OS, Postgres and the object store.
+# Runs are launched by the daemon, so the Spark driver lives in dagster-daemon (client mode).
+x-spark: &spark
+  image: ${LAKEHOUSE_IMAGE:-sec-lakehouse:local}
+  restart: unless-stopped
+  environment:
+    SPARK_NO_DAEMONIZE: "true"
+
+x-worker: &worker
+  <<: *spark
+  command:
+    - spark-class
+    - org.apache.spark.deploy.worker.Worker
+    - spark://spark-master:7077
+    - --cores
+    - "${SPARK_WORKER_CORES:-10}"
+    - --memory
+    - "${SPARK_WORKER_MEMORY:-20g}"
+  depends_on: [spark-master]
+
+services:
+  spark-master:
+    <<: *spark
+    hostname: spark-master
+    command: ["spark-class", "org.apache.spark.deploy.master.Master", "--host", "spark-master"]
+    ports:
+      - "8080:8080" # Spark master UI
+
+  spark-worker-1: *worker
+  spark-worker-2: *worker
+
+  dagster-daemon:
+    environment:
+      SPARK_MASTER: spark://spark-master:7077
+      SPARK_EXTRA_CONF: >-
+        spark.driver.host=dagster-daemon,spark.executor.cores=${SPARK_EXECUTOR_CORES:-5},spark.executor.memory=${SPARK_EXECUTOR_MEMORY:-9g}
+    depends_on:
+      spark-master:
+        condition: service_started

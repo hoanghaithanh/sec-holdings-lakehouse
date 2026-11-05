@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+# local data and Dagster state
+data/
+.dagster_home/
+spark-warehouse/
+metastore_db/
+derby.log
+# environment files hold secrets; only the examples are committed
+.env
+.env.*
+!.env.example
+!.env.uat.example
