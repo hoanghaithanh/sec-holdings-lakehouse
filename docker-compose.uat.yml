@@ -25,7 +25,7 @@ services:
     hostname: spark-master
     command: ["spark-class", "org.apache.spark.deploy.master.Master", "--host", "spark-master"]
     ports:
-      - "8080:8080" # Spark master UI
+      - "${SPARK_UI_PORT:-8080}:8080" # Spark master UI (8080 is taken on the homelab, .env.uat sets 8090)
 
   spark-worker-1: *worker
   spark-worker-2: *worker
@@ -38,3 +38,17 @@ services:
     depends_on:
       spark-master:
         condition: service_started
+
+# Keep lakehouse data on the big disk, not under /var/lib/docker on the SSD.
+# Create the folders before the first `up`: mkdir -p $LAKEHOUSE_DATA_DIR/postgres $LAKEHOUSE_DATA_DIR/object-store
+volumes:
+  postgres-data:
+    driver_opts:
+      type: none
+      o: bind
+      device: ${LAKEHOUSE_DATA_DIR:?set LAKEHOUSE_DATA_DIR in .env.uat}/postgres
+  object-store-data:
+    driver_opts:
+      type: none
+      o: bind
+      device: ${LAKEHOUSE_DATA_DIR:?set LAKEHOUSE_DATA_DIR in .env.uat}/object-store
