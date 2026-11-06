@@ -73,6 +73,13 @@ make validate  # dagster definitions validate
 make check     # all of the above, same as CI
 ```
 
+### How the work is organised
+
+Each milestone starts with a spec (`docs/specs/`) and ADRs (`docs/adr/`), then moves in small,
+reviewed PRs, and ends with an acceptance run on the homelab UAT stack. Claude Code subagents in
+`.claude/agents/` help with specs, design, review, tests, ops and docs; [`CLAUDE.md`](CLAUDE.md)
+describes the workflow.
+
 ## Repository layout
 
 ```
