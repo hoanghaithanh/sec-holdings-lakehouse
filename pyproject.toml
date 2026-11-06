@@ -11,6 +11,7 @@ dependencies = [
     "pyspark>=3.5.3,<3.6",
     "delta-spark>=3.3,<3.4",
     "httpx>=0.28,<0.29",
+    "boto3>=1.40,<2",
 ]
 
 [dependency-groups]
@@ -18,6 +19,7 @@ dev = [
     "mypy>=1.13",
     "pytest>=8",
     "ruff>=0.8",
+    "types-boto3[s3]>=1.40",
 ]
 
 [build-system]
