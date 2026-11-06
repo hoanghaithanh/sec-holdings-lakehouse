@@ -3,9 +3,8 @@
 - Status: Proposed
 - Date: 2026-11-06
 - Spec: `docs/specs/m1-bronze-ingestion.md`
-- Depends on open questions: **Q2** (Source 2 not in M1, but the client must be reusable for
-  it), **Q6** (keep the first copy of a republished zip). Written on the spec's recommended
-  answers.
+- Spec decisions it builds on: **Q2** (Source 2 not in M1, #5, but the client must be reusable
+  for it), **Q6** (keep the first copy of a republished zip; automatic detection is #7). Decided by Thanh on 2026-11-06.
 
 ## Context
 

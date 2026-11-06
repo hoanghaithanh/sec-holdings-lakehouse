@@ -3,8 +3,8 @@
 - Status: Proposed
 - Date: 2026-11-06
 - Spec: `docs/specs/m1-bronze-ingestion.md`
-- Depends on open questions: **Q1** (partition key), **Q4** (all-string columns), **Q5**
-  (sensor). Written on the spec's recommended answers.
+- Spec decisions it builds on: **Q1** (partition per data set), **Q4** (all-string columns), **Q5**
+  (no sensor in M1, #6). Decided by Thanh on 2026-11-06.
 
 ## Context
 

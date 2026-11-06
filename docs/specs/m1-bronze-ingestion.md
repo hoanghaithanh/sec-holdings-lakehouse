@@ -1,6 +1,6 @@
 # M1 Bronze ingestion: spec
 
-- Status: Draft, waiting for Thanh's approval (Checkpoint 1)
+- Status: Open questions decided by Thanh on 2026-11-06; approved when PR #4 merges (Checkpoint 1)
 - Date: 2026-11-06
 - Build window: Tue 2026-11-10 to Sun 2026-12-20, about 6 weeks at 6 h/week (~36 h)
 
@@ -58,7 +58,7 @@ field and change nothing.
 - Sizes of the zips and row counts per set: **unverified**. INFOTABLE is expected to be millions
   of rows per set; the backfill measures the real numbers.
 
-### Source 2: EDGAR full-index and information-table XML (only if kept, Q2)
+### Source 2: EDGAR full-index and information-table XML (deferred, Q2, #5)
 
 - Index: `https://www.sec.gov/Archives/edgar/full-index/<YYYY>/QTR<n>/` with `form.idx`,
   `company.idx`, `master.idx` (pipe-delimited: CIK, company name, form type, date filed,
@@ -124,7 +124,7 @@ All seven share these rules:
 Keys are unique **within one `_dataset`**. Whether an accession number can appear in two data sets
 is unknown; DQ7 measures it.
 
-### If Source 2 is kept (Q2)
+### Source 2 tables (deferred, Q2, #5)
 
 - `raw/edgar_full_index/<YYYY>/QTR<n>/form.idx`, written once per closed quarter. The current,
   still-growing quarter is re-fetched under a dated name, never overwriting an older copy.
@@ -180,10 +180,10 @@ Checks marked **block** fail the asset; **warn** record a number and let the run
   `2023q3`) completes using local storage.
 - **AC12** `make check` and CI are green; tests use small real fixtures in `tests/fixtures/`.
 
-If Source 2 is kept: **AC13** for one closed index quarter, every 13F-HR in `form.idx` that is
+Deferred with Source 2 (#5): **AC13** for one closed index quarter, every 13F-HR in `form.idx` that is
 not in a published data set has exactly one raw XML object and its holdings in
 `bronze.edgar_infotable`; a rerun makes zero HTTP requests for filings already landed.
-If the sensor is kept: **AC14** with the published list mocked to add a new zip, the sensor
+Deferred with the sensor (#6): **AC14** with the published list mocked to add a new zip, the sensor
 requests exactly one run for the new partition and none on its next tick.
 
 ## Edge cases
@@ -231,24 +231,19 @@ Core fits with about 4 h of buffer. Core + Source 2 + sensor (~46 h) does **not*
 2026-12-20. Recommended cut: ship the core in M1, move Source 2 to its own slice early in M2
 (or a M1.5), keep the sensor as stretch only if the core lands by 2026-12-06.
 
-## Open questions for Thanh
+## Decisions (Thanh, 2026-11-06)
 
-- **Q1 Partition key.** Options: (a) one partition per SEC data set; (b) filing quarter;
-  (c) period-of-report quarter. *Recommended: (a).* One zip = one partition = one
-  `replaceWhere`. (b) needs two zips per partition from 2024 on, because SEC sets are now
-  Mar-May, Jun-Aug and so on; (c) breaks idempotency because late amendments land in old
-  partitions. Filing quarter and period of report stay as columns, so M2 can partition Silver by
-  period of report.
-- **Q2 Source 2 in M1?** The data sets already cover through August 2026, so the XML path only
-  adds the newest 1 to 3 months. *Recommended: not in M1*; plan it as a separate slice.
-- **Q3 Backfill start.** *Recommended: `2013q2`*, the first data set, rather than 2014. It costs
-  three more zips and makes "all of 13F XML history" a clean claim.
-- **Q4 Bronze column types.** *Recommended: all source columns as strings*, typing in M2. The
-  alternative is typing in Bronze, which is friendlier to query but turns bad values into load
-  failures or silent nulls.
-- **Q5 Sensor.** *Recommended: stretch only*, after the core passes AC1 to AC12.
-- **Q6 Republished zips.** *Recommended: keep the first copy, manual re-land via runbook.*
-  Alternative: detect a changed checksum and land it as a new version automatically.
+All six open questions were settled on the recommended answers. Deferred work is tracked as issues.
+
+- **Q1 Partition key: one partition per SEC data set.** One zip = one partition = one
+  `replaceWhere`. Filing quarter and period of report stay as columns, so M2 can partition Silver
+  by period of report.
+- **Q2 Source 2 (EDGAR full-index + XML): not in M1.** Backlog: #5.
+- **Q3 Backfill start: `2013q2`**, the first data set.
+- **Q4 Bronze column types: all source columns as strings**, typed in M2.
+- **Q5 Sensor: not in M1.** New data sets are added by a quarterly runbook step. Backlog: #6.
+- **Q6 Republished zips: keep the first copy, re-land by hand via the runbook** (Option A).
+  Automatic detection and versioned raw copies (Option B) are in the backlog: #7.
 
 ## Candidate ADRs for the architect
 
