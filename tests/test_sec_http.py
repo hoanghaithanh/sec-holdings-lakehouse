@@ -275,3 +275,23 @@ def test_download_retries_when_shorter_than_content_length() -> None:
 
     assert dest.getvalue() == body
     assert result.attempts == 2
+
+
+def test_error_reports_the_real_attempt_count() -> None:
+    seen: list[httpx.Request] = []
+    responses = [httpx.Response(503), httpx.Response(503), httpx.Response(403)]
+    client = make_client(scripted(responses, seen), FakeClock())
+    with pytest.raises(SecBlockedError, match="attempts=3") as info:
+        client.get(URL)
+    assert info.value.attempts == 3
+
+
+def test_download_refuses_an_encoded_body() -> None:
+    seen: list[httpx.Request] = []
+    gzipped = httpx.Response(
+        200, headers={"Content-Encoding": "gzip"}, stream=httpx.ByteStream(b"\x1f\x8b")
+    )
+    client = make_client(scripted([gzipped], seen), FakeClock())
+    with pytest.raises(SecRequestError, match="Content-Encoding"):
+        client.download(URL, io.BytesIO())
+    assert len(seen) == 1

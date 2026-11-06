@@ -74,6 +74,9 @@ Unit tests: both name formats, the two-month `01jan2024-29feb2024` set, a year-c
 set, keys unique and sorted, unknown formats rejected. The zip name is kept, so the URL and raw
 path are never rebuilt from the key.
 
+*Amended 2026-11-06 (slice 1):* the list holds each zip's full URL (`FORM13F_ZIP_URLS`), because
+SEC links the newest zip from a different folder; the zip name and key are derived from it.
+
 ### Assets and dependencies
 
 ```mermaid

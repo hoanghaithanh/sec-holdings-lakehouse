@@ -38,8 +38,15 @@ def test_sec_resource_fails_at_start_without_user_agent() -> None:
         SecResource(user_agent="").setup_for_execution(build_init_resource_context())
 
 
-def test_sec_resource_builds_client() -> None:
+def test_sec_resource_reuses_one_client_per_step() -> None:
+    from dagster import build_init_resource_context
+
     from sec_lakehouse.resources import SecResource
 
-    client = SecResource(user_agent="sec-lakehouse-tests ops@example.com").get_client()
-    client.close()
+    resource = SecResource(user_agent="sec-lakehouse-tests ops@example.com")
+    context = build_init_resource_context()
+    resource.setup_for_execution(context)
+    client = resource.get_client()
+    assert resource.get_client() is client  # one rate limiter for the whole step
+    resource.teardown_after_execution(context)
+    assert resource.get_client() is not client

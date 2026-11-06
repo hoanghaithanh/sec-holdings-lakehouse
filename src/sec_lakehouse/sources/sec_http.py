@@ -46,10 +46,15 @@ class SecRequestError(RuntimeError):
     """A request to sec.gov failed for good (after retries, or with a non-retryable status)."""
 
     def __init__(self, message: str, *, url: str, status: int | None, attempts: int) -> None:
-        super().__init__(f"{message} (url={url}, status={status}, attempts={attempts})")
+        super().__init__(message)
+        self.message = message
         self.url = url
         self.status = status
         self.attempts = attempts
+
+    def __str__(self) -> str:
+        # Built on demand: the retry loop updates `attempts` after the error is created.
+        return f"{self.message} (url={self.url}, status={self.status}, attempts={self.attempts})"
 
 
 class SecBlockedError(SecRequestError):
@@ -183,6 +188,14 @@ class SecClient:
             with self._stream(url, headers={"Accept-Encoding": "identity"}) as response:
                 header = response.headers.get("Content-Length")
                 content_length = int(header) if header and header.isdigit() else None
+                encoding = response.headers.get("Content-Encoding", "identity").lower()
+                if encoding != "identity":
+                    raise SecRequestError(
+                        f"SEC sent Content-Encoding {encoding!r} for a download",
+                        url=url,
+                        status=response.status_code,
+                        attempts=attempts,
+                    )
                 for chunk in response.iter_raw(CHUNK_SIZE):
                     dest.write(chunk)
                     digest.update(chunk)

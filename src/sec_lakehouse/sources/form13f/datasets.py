@@ -5,8 +5,8 @@ three-month filing windows from 2024 (`01mar2024-31may2024_form13f.zip`). Each z
 partition with a key that sorts in time order: `2013q2` ... `2023q4`, then `YYYY-MM_YYYY-MM`.
 
 The URL of each zip is kept exactly as SEC links it, because the folder is not the same for
-every file. To add a newly published data set, append its URL to `FORM13F_ZIP_URLS` (see the
-runbook). The list was copied from the SEC data sets page on 2026-11-06.
+every file. To add a newly published data set, append its URL to `FORM13F_ZIP_URLS` exactly as the
+SEC page links it. The list was copied from the SEC data sets page on 2026-11-06.
 """
 
 from __future__ import annotations
@@ -21,7 +21,8 @@ from dagster import StaticPartitionsDefinition
 DATASETS_PAGE = "https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets"
 
 _BASE = "https://www.sec.gov/files/structureddata/data/form-13f-data-sets"
-_BASE_2026 = "https://www.sec.gov/files/datastandardsinnovation/data/form-13f-data-sets"
+# Newer files are linked from a different folder (checked on 2026-11-06).
+_BASE_DSI = "https://www.sec.gov/files/datastandardsinnovation/data/form-13f-data-sets"
 
 _QUARTERS = [f"{year}q{q}" for year in range(2013, 2024) for q in range(1, 5)][1:]  # from 2013q2
 _WINDOWS_2024_ON = [
@@ -39,7 +40,7 @@ _WINDOWS_2024_ON = [
 
 FORM13F_ZIP_URLS: tuple[str, ...] = (
     *(f"{_BASE}/{name}_form13f.zip" for name in [*_QUARTERS, *_WINDOWS_2024_ON]),
-    f"{_BASE_2026}/01jun2026-31aug2026_form13f.zip",
+    f"{_BASE_DSI}/01jun2026-31aug2026_form13f.zip",
 )
 
 _QUARTER_NAME = re.compile(r"(?P<year>\d{4})q(?P<q>[1-4])_form13f\.zip")
