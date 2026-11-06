@@ -96,6 +96,9 @@ SecClient(user_agent, max_rps, transport=None, clock=time.monotonic, sleep=time.
 - **Hosts**: only `https://www.sec.gov/` URLs are accepted, so the User-Agent (with the email) is
   never sent anywhere else. The exact zip URL path is **unverified** (sec.gov was blocked from
   the sandbox); it is checked in the first build slice and kept as one constant.
+  *Amended 2026-11-06 (slice 1):* the SEC page links the newest zip from a different folder
+  (`/files/datastandardsinnovation/...` instead of `/files/structureddata/...`), so the code
+  keeps each zip's full URL as SEC links it, in `FORM13F_ZIP_URLS`, instead of one base constant.
 - **Rate limiter**: every attempt, including retries, waits until at least `1 / max_rps` seconds
   have passed since the previous request started. With a lock, so a thread pool in Source 2 can
   share one client. At 5/s that is 200 ms between requests, well under 10 in any second.

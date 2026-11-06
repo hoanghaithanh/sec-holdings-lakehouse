@@ -11,6 +11,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
+from sec_lakehouse.sources.sec_http import DEFAULT_MAX_RPS, validate_max_rps
+
 
 class Env(StrEnum):
     DEV = "dev"
@@ -27,6 +29,8 @@ class Settings:
     s3_access_key: str | None
     s3_secret_key: str | None
     spark_extra_conf: dict[str, str]
+    # The SEC User-Agent is not here: it is a secret-ish value read only at run time (ADR-003).
+    sec_max_requests_per_second: int = DEFAULT_MAX_RPS
 
     @property
     def uses_object_store(self) -> bool:
@@ -51,6 +55,7 @@ class Settings:
             s3_access_key=environ.get("S3_ACCESS_KEY") or None,
             s3_secret_key=environ.get("S3_SECRET_KEY") or None,
             spark_extra_conf=parse_spark_conf(environ.get("SPARK_EXTRA_CONF", "")),
+            sec_max_requests_per_second=parse_max_rps(environ.get("SEC_MAX_REQUESTS_PER_SECOND")),
         )
         settings._validate()
         return settings
@@ -75,3 +80,14 @@ def parse_spark_conf(raw: str) -> dict[str, str]:
             )
         conf[key.strip()] = value.strip()
     return conf
+
+
+def parse_max_rps(raw: str | None) -> int:
+    """SEC_MAX_REQUESTS_PER_SECOND: an integer from 1 to 10, default 5 (ADR-003)."""
+    if raw is None or not raw.strip():
+        return DEFAULT_MAX_RPS
+    try:
+        value = int(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"SEC_MAX_REQUESTS_PER_SECOND must be an integer, got {raw!r}") from exc
+    return validate_max_rps(value)
