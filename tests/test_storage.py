@@ -41,7 +41,9 @@ def test_local_put_new_refuses_to_overwrite(tmp_path: Path) -> None:
     assert b"".join(storage.iter_bytes("raw/a.zip")) == b"first"
 
 
-@pytest.mark.parametrize("bad", ["", "/abs", "raw/../escape", "raw\\win"])
+@pytest.mark.parametrize(
+    "bad", ["", "/abs", "raw/../escape", "raw\\win", "C:/x", "C:x", "raw//a", "raw/./a"]
+)
 def test_rejects_paths_outside_the_root(tmp_path: Path, bad: str) -> None:
     with pytest.raises(ValueError, match="invalid storage path"):
         LakehouseStorage(root_uri=str(tmp_path)).exists(bad)
@@ -119,3 +121,38 @@ def test_s3_other_errors_are_not_hidden() -> None:
     fake.head_object = denied  # type: ignore[method-assign]
     with pytest.raises(ClientError):
         storage.exists("raw/a.zip")
+
+
+def test_local_put_new_loses_a_race_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = LakehouseStorage(root_uri=str(tmp_path / "lake"))
+    # Another writer lands the file after our exists() check.
+    monkeypatch.setattr(LakehouseStorage, "exists", lambda self, path: False)
+    storage.put_new("raw/a.zip", write(tmp_path, "one", b"first"))
+    with pytest.raises(FileExistsError):
+        storage.put_new("raw/a.zip", write(tmp_path, "two", b"second"))
+    assert (tmp_path / "lake/raw/a.zip").read_bytes() == b"first"
+    assert [p.name for p in (tmp_path / "lake/raw").iterdir()] == ["a.zip"]
+
+
+def test_s3_existing_object_is_not_uploaded_again(tmp_path: Path) -> None:
+    storage, fake = s3_storage()
+    storage.put_new("raw/a.zip", write(tmp_path, "a", b"x"))
+    uploads: list[str] = []
+    fake.upload_file = lambda Filename, Bucket, Key: uploads.append(Key)  # type: ignore[method-assign]
+    with pytest.raises(FileExistsError):
+        storage.put_new("raw/a.zip", write(tmp_path, "b", b"y"))
+    assert uploads == []
+
+
+def test_s3_client_uses_path_style_and_quiet_checksums() -> None:
+    storage = LakehouseStorage(
+        root_uri="s3a://lakehouse",
+        s3_endpoint="http://object-store:9000",
+        s3_access_key="k",
+        s3_secret_key="s",
+    )
+    config = storage._s3_client().meta.config
+    assert config.s3 is not None and config.s3["addressing_style"] == "path"
+    assert config.request_checksum_calculation == "when_required"

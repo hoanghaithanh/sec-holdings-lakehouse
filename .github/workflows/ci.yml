@@ -82,6 +82,27 @@ jobs:
             'curl -fsS --aws-sigv4 aws:amz:us-east-1:s3 --user "$RUSTFS_ACCESS_KEY:$RUSTFS_SECRET_KEY" \
             "http://localhost:9000/lakehouse?list-type=2&prefix=bronze/hello_delta/_delta_log/"' \
             | grep -q '00000000000000000000.json'
+      - name: Round-trip a raw file through the object store with boto3
+        # The raw layer writes with boto3, not Spark; check it works against the real RustFS.
+        run: |
+          docker compose exec -T dagster-daemon python -c '
+          import os, tempfile
+          from sec_lakehouse.resources import LakehouseStorage
+          s = LakehouseStorage(root_uri=os.environ["LAKEHOUSE_ROOT"], s3_endpoint=os.environ["S3_ENDPOINT"],
+                               s3_access_key=os.environ["S3_ACCESS_KEY"], s3_secret_key=os.environ["S3_SECRET_KEY"])
+          path = "raw/_smoke/hello.bin"
+          assert not s.exists(path)
+          with tempfile.NamedTemporaryFile(delete=False) as f:
+              f.write(b"hello raw")
+          s.put_new(path, f.name)
+          assert s.exists(path) and b"".join(s.iter_bytes(path)) == b"hello raw"
+          try:
+              s.put_new(path, f.name)
+          except FileExistsError:
+              print("raw round-trip ok")
+          else:
+              raise SystemExit("put_new overwrote an existing object")
+          '
       - name: Show logs on failure
         if: failure()
         run: docker compose logs --no-color --tail 200

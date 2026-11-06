@@ -3,6 +3,7 @@
 # No `from __future__ import annotations` here: Dagster inspects the context annotation at runtime.
 import tempfile
 import zipfile
+import zlib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -45,8 +46,9 @@ def download_verified_zip(client: SecClient, url: str, dest: Path) -> DownloadRe
         try:
             with zipfile.ZipFile(dest) as archive:
                 bad_member = archive.testzip()
-        except zipfile.BadZipFile as exc:
-            bad_member = f"not a zip file ({exc})"
+        except (zipfile.BadZipFile, zlib.error, EOFError) as exc:
+            # A bad CRC shows up as a bad member; damaged deflate data raises instead.
+            bad_member = f"{type(exc).__name__}: {exc}"
         if bad_member is None:
             return result
         if attempt == MAX_DOWNLOADS:

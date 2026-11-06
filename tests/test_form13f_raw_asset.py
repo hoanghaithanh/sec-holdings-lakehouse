@@ -19,6 +19,7 @@ UA = "sec-lakehouse-tests ops@example.com"
 Handler = Callable[[httpx.Request], httpx.Response]
 Install = Callable[[list[bytes]], list[httpx.Request]]
 # The handler the mock SEC client answers with; set per test by the `sec_serves` fixture.
+# A module global is enough because `materialize` runs the step in this process.
 _mock: dict[str, Handler] = {}
 
 
@@ -61,6 +62,16 @@ def sec_serves() -> Iterator[Install]:
 
     yield install
     _mock.clear()
+
+
+def damaged_zip_bytes() -> bytes:
+    """A real zip with one byte of its compressed data flipped (raises zlib.error on read)."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("INFOTABLE.tsv", "".join(f"row {i}\tvalue {i * 7}\n" for i in range(2000)))
+    data = bytearray(buffer.getvalue())
+    data[60] ^= 0xFF  # inside the deflate stream of the only member
+    return bytes(data)
 
 
 def run(storage: LakehouseStorage, key: str = "2013q2") -> dict[str, object]:
@@ -110,6 +121,12 @@ def test_corrupt_zip_is_downloaded_again(tmp_path: Path, sec_serves: Install) ->
     meta = run(LakehouseStorage(root_uri=str(tmp_path)))
     assert len(seen) == 2
     assert meta["sha256"] == hashlib.sha256(body).hexdigest()
+
+
+def test_damaged_deflate_data_is_downloaded_again(tmp_path: Path, sec_serves: Install) -> None:
+    seen = sec_serves([damaged_zip_bytes(), zip_bytes()])
+    run(LakehouseStorage(root_uri=str(tmp_path)))
+    assert len(seen) == 2
 
 
 def test_corrupt_twice_fails_and_lands_nothing(tmp_path: Path, sec_serves: Install) -> None:

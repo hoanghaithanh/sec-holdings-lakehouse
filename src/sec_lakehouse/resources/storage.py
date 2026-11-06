@@ -73,6 +73,9 @@ class LakehouseStorage(ConfigurableResource):  # type: ignore[type-arg]
         """Store a local file at `path`. Refuses to overwrite: raw files are written once.
 
         The file appears whole or not at all, so a failed upload never leaves a partial file.
+        On local disk the refusal is atomic. On S3 it is a check before the upload, so two runs
+        of the same partition at the same moment could both upload; they upload the same bytes,
+        and Bronze writes are serialized anyway (ADR-002).
         """
         path = _check_path(path)
         if self.exists(path):
@@ -81,11 +84,13 @@ class LakehouseStorage(ConfigurableResource):  # type: ignore[type-arg]
             target = self._local(path)
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-            shutil.copyfile(source, tmp)
             try:
-                os.link(tmp, target)  # atomic, and fails if another writer got there first
+                shutil.copyfile(source, tmp)
+                # A hard link is atomic and, unlike os.replace, fails if the target appeared
+                # meanwhile. Needs a filesystem with hard links (NTFS, ext4, APFS; not FAT).
+                os.link(tmp, target)
             finally:
-                tmp.unlink()
+                tmp.unlink(missing_ok=True)
             return
         bucket, key = self._bucket_key(path)
         # upload_file switches to multipart for big files; S3 shows the object only when done.
@@ -128,18 +133,37 @@ class LakehouseStorage(ConfigurableResource):  # type: ignore[type-arg]
     def _s3_client(self) -> S3Client:
         if self._s3 is None:
             import boto3
+            from botocore.config import Config
 
             self._s3 = boto3.client(
                 "s3",
                 endpoint_url=self.s3_endpoint,
                 aws_access_key_id=self.s3_access_key,
                 aws_secret_access_key=self.s3_secret_key,
+                region_name="us-east-1",
+                config=Config(
+                    # Same as Spark's fs.s3a.path.style.access=true: RustFS has no
+                    # bucket-per-hostname DNS.
+                    s3={"addressing_style": "path"},
+                    # Newer botocore adds CRC32 checksum headers to every upload by default,
+                    # which some S3-compatible stores reject. Only send them when required.
+                    request_checksum_calculation="when_required",
+                    response_checksum_validation="when_required",
+                    retries={"max_attempts": 5, "mode": "standard"},
+                ),
             )
         return self._s3  # type: ignore[no-any-return]
 
 
 def _check_path(path: str) -> str:
     """Relative, forward-slash paths only, so nothing can escape the root."""
-    if not path or path.startswith("/") or "\\" in path or ".." in path.split("/"):
+    segments = path.split("/")
+    if (
+        not path
+        or path.startswith("/")
+        or "\\" in path
+        or ":" in segments[0]  # Windows drive (C:/x) would drop the root on ThanhPC
+        or any(segment in {"", ".", ".."} for segment in segments)
+    ):
         raise ValueError(f"invalid storage path: {path!r}")
     return path
