@@ -6,7 +6,7 @@ from dagster import Definitions, EnvVar, load_assets_from_modules
 
 from sec_lakehouse.assets import hello
 from sec_lakehouse.config import Settings
-from sec_lakehouse.resources import LakehouseStorage, SparkResource
+from sec_lakehouse.resources import LakehouseStorage, SecResource, SparkResource
 
 
 def build_resources(settings: Settings) -> dict[str, object]:
@@ -23,6 +23,11 @@ def build_resources(settings: Settings) -> dict[str, object]:
             extra_conf=settings.spark_extra_conf,
         ),
         "storage": LakehouseStorage(root_uri=settings.lakehouse_root),
+        # Resolved when a run starts, so validation and CI work without it (ADR-003).
+        "sec": SecResource(
+            user_agent=EnvVar("SEC_USER_AGENT"),
+            max_requests_per_second=settings.sec_max_requests_per_second,
+        ),
     }
 
 
