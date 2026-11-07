@@ -1,0 +1,61 @@
+name: Deploy UAT
+
+# Runs after CI passes on main, so the image CI pushed to GHCR for that commit exists.
+# The job runs on a self-hosted runner on the homelab, because GitHub's runners cannot reach
+# the LAN. workflow_run has no paths filter, so docs-only changes are skipped in a step below.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch: # manual redeploy of the current main, once its CI run is green
+
+# One deploy at a time; a newer one waits instead of cancelling a deploy halfway.
+concurrency:
+  group: deploy-uat
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: [self-hosted, uat]
+    timeout-minutes: 20
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - name: Fast-forward the server checkout
+        run: |
+          cd ~/sec-lakehouse # the server checkout that holds .env.uat
+          git fetch -q origin main
+          if [ "$(git rev-parse HEAD)" != "$SHA" ] && git merge-base --is-ancestor "$SHA" HEAD; then
+            echo "$SHA is older than what is deployed, skipping"; echo "SKIP=1" >> "$GITHUB_ENV"; exit 0
+          fi
+          # Fails loudly if the server checkout has diverged from main.
+          changed=$(git diff --name-only HEAD "$SHA")
+          git merge -q --ff-only "$SHA"
+          if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ] && [ -n "$changed" ] \
+             && ! printf '%s\n' "$changed" | grep -qvE '^docs/|\.md$'; then
+            echo "Docs-only change, no restart needed"; echo "SKIP=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Pull and restart the stack
+        if: env.SKIP != '1'
+        run: |
+          cd ~/sec-lakehouse
+          # Pin the exact image CI built for this commit, not the moving :latest tag.
+          export LAKEHOUSE_IMAGE="ghcr.io/${GITHUB_REPOSITORY}:sha-${SHA::7}"
+          dc="docker compose -f docker-compose.yml -f docker-compose.uat.yml --env-file .env.uat"
+          $dc pull --quiet
+          $dc up -d --no-build
+          for i in $(seq 1 60); do
+            state=$(docker inspect -f '{{.State.Health.Status}}' "$($dc ps -q dagster-webserver)")
+            [ "$state" = healthy ] && { $dc ps; exit 0; }
+            sleep 5
+          done
+          echo "webserver did not become healthy"; $dc logs --no-color --tail 100; exit 1
