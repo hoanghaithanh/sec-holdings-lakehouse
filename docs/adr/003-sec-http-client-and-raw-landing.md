@@ -129,6 +129,13 @@ SecClient(user_agent, max_rps, transport=None, clock=time.monotonic, sleep=time.
 `delete_prefix`, which refuses anything outside `staging/`), using `S3_ENDPOINT` and the S3 keys
 already in config. No code path is specific to one machine.
 
+*Amended 2026-11-06 (slice 2):* the API is `exists`, `put_new`, `iter_bytes` and `sha256`
+(`delete_prefix` comes with the staging slice). On local disk `put_new` copies to a temp name and
+then hard-links it into place (`os.link`), not `os.replace`, because a link fails if the target
+already exists while `os.replace` would silently overwrite; this needs a filesystem with hard
+links (NTFS, ext4, APFS). On S3 it is a check before the upload. The boto3 client is set to
+path-style addressing and sends checksum headers only when required, for RustFS.
+
 ### Unpack and parse (used by ADR-002)
 
 - **Unpack (driver, streaming)**: for each member, read the header line, compare it with the

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dagster import Definitions, EnvVar, load_assets_from_modules
 
-from sec_lakehouse.assets import hello
+from sec_lakehouse.assets import form13f_raw, hello
 from sec_lakehouse.config import Settings
 from sec_lakehouse.resources import LakehouseStorage, SecResource, SparkResource
 
@@ -22,7 +22,12 @@ def build_resources(settings: Settings) -> dict[str, object]:
             s3_secret_key=secret_key,
             extra_conf=settings.spark_extra_conf,
         ),
-        "storage": LakehouseStorage(root_uri=settings.lakehouse_root),
+        "storage": LakehouseStorage(
+            root_uri=settings.lakehouse_root,
+            s3_endpoint=settings.s3_endpoint,
+            s3_access_key=access_key,
+            s3_secret_key=secret_key,
+        ),
         # Resolved when a run starts, so validation and CI work without it (ADR-003).
         "sec": SecResource(
             user_agent=EnvVar("SEC_USER_AGENT"),
@@ -32,6 +37,6 @@ def build_resources(settings: Settings) -> dict[str, object]:
 
 
 defs = Definitions(
-    assets=load_assets_from_modules([hello]),
+    assets=load_assets_from_modules([hello, form13f_raw]),
     resources=build_resources(Settings.from_env()),
 )
