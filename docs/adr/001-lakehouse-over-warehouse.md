@@ -1,6 +1,6 @@
 # ADR-001: Lakehouse on Delta Lake instead of a warehouse
 
-- Status: Proposed (Thanh to confirm the reasoning)
+- Status: Accepted (Thanh confirmed 2026-11-08)
 - Date: 2026-11-05
 
 ## Context
