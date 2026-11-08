@@ -80,10 +80,13 @@ workflow, so invoking these agents at the steps below is expected.
 **Build loop (every session)**
 1. The main session implements one small slice with its tests. There is no developer subagent.
 2. `code-reviewer` reviews the diff. Fix Blockers and Majors before opening or updating the PR.
-   Ops changes (CI, Docker, Compose, environment config, CI runners) also get `devops-engineer`.
-   When secrets, Compose, ports, networking, the tunnel or a CI runner change, `security-auditor`
-   reviews too, before the PR is opened.
-3. Open a PR (template in `.github/pull_request_template.md`), CI must be green.
+   Ops changes (CI workflows, Docker, Compose, Makefile, env examples) also get `devops-engineer`.
+   When CI workflows (they can reach the self-hosted runner), Compose, env examples, secrets, ports,
+   networking or the tunnel change, `security-auditor` reviews too, before the PR is opened.
+3. Open a PR (template in `.github/pull_request_template.md`), CI must be green. The PR's
+   **Agents run** section names each agent that ran and what it found; the `PR agents` CI check
+   (`scripts/check_pr_agents.py`) fails if an agent the changed files need is missing from it.
+   A skip is allowed only with its reason written there (`skip: <reason>` for a small manual PR).
 4. **Checkpoint 2**: Thanh merges. Claude never merges or pushes to `main`.
 
 **Milestone close (once per milestone)**
@@ -95,6 +98,10 @@ workflow, so invoking these agents at the steps below is expected.
 5. **Checkpoint 3**: Thanh signs off and closes the milestone.
 
 Skip what doesn't apply: a small fix goes straight into the build loop with no spec or ADR.
+Agents are listed by the Agent tool only if `.claude/agents/` existed when the session started. If
+they are missing (a cloud session can start from an older checkout), run a `general-purpose` agent
+told to read the agent's file and follow it exactly, keep to its tools (read-only agents stay
+read-only), and pass the agent's `model`. Don't skip the step.
 Agents don't call each other. When something is ambiguous, an agent states its assumption in its
 output, and the main session raises it with Thanh at the next checkpoint.
 

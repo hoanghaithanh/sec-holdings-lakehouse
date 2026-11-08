@@ -1,0 +1,37 @@
+name: PR agents
+
+# Fails a PR whose "Agents run" section doesn't name the agents its changes need
+# (rules in scripts/check_pr_agents.py, which mirror the build loop in CLAUDE.md).
+# Re-runs when the PR body is edited, so fixing the description turns it green.
+# It runs the PR's own copy of the script, so it is a process check, not a security boundary.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-agents-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  agents-run:
+    # Dependabot can't fill in the section; its PRs are reviewed at merge instead.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the "Agents run" section
+        env:
+          # Passed through env, never interpolated into the script, so the body can't inject shell.
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check_pr_agents.py "$BASE_SHA" "$HEAD_SHA"

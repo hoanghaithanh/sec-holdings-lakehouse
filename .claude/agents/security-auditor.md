@@ -1,6 +1,6 @@
 ---
 name: security-auditor
-description: Use before a UAT promotion that changes secrets, Compose, exposed ports or networking, and once before the repo is showcased in M5. Read-only. Not needed for ordinary pipeline changes.
+description: Use on any PR, and before a UAT promotion, that changes secrets, Compose, exposed ports, networking, the tunnel, CI workflows or a CI runner, and once before the repo is showcased in M5. Read-only. Not needed for ordinary pipeline changes.
 tools: Read, Grep, Glob, Bash, mcp__github__pull_request_read, mcp__github__issue_read, mcp__github__list_issues
 model: opus
 effort: high
