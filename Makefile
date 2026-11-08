@@ -23,7 +23,7 @@ up:
 	docker compose up --build
 
 up-uat:
-	docker compose -f docker-compose.yml -f docker-compose.uat.yml --env-file .env.uat up -d
+	docker compose -f docker-compose.yml -f docker-compose.uat.yml --env-file .env.uat up -d --pull always
 
 down:
 	docker compose down

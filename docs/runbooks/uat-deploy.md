@@ -45,3 +45,8 @@ good as root on the box, so never point a `pull_request` job at `runs-on: [self-
   older than what is deployed (re-running the latest one redeploys it). Revert the bad commit on `main` with a normal PR instead.
   In an emergency on the server: `git checkout <good-sha>` in `~/sec-lakehouse`, then
   `LAKEHOUSE_IMAGE=ghcr.io/hoanghaithanh/sec-holdings-lakehouse:sha-<good7> make up-uat`.
+- `make up-uat` pulls the image first. Without that, `:latest` from `.env.uat` resolved to whatever
+  stale copy the server had cached, and Dagster came up without the newer assets.
+- Deploys stuck in "Queued" after a reboot: the runner may have started before the clock synced
+  and quit with "runner registration has been deleted". Check `timedatectl`, then
+  `sudo ./svc.sh start` in the runner folder, and cancel and re-run the queued deploy.
