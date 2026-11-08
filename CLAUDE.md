@@ -73,11 +73,16 @@ workflow, so invoking these agents at the steps below is expected.
 **Milestone start (once per milestone)**
 1. `requirements-analyst` writes the milestone spec in `docs/specs/`.
 2. `architect` writes 1 or 2 ADRs for the decisions that matter.
-3. **Checkpoint 1**: Thanh approves the spec and ADRs. Do not start building before that.
+3. **Checkpoint 1**: Thanh approves the spec and ADRs. Do not start building before that. Once
+   Thanh approves, push a last commit marking the spec Approved and the ADRs Accepted, then Thanh
+   merges.
 
 **Build loop (every session)**
 1. The main session implements one small slice with its tests. There is no developer subagent.
 2. `code-reviewer` reviews the diff. Fix Blockers and Majors before opening or updating the PR.
+   Ops changes (CI, Docker, Compose, environment config, CI runners) also get `devops-engineer`.
+   When secrets, Compose, ports, networking, the tunnel or a CI runner change, `security-auditor`
+   reviews too, before the PR is opened.
 3. Open a PR (template in `.github/pull_request_template.md`), CI must be green.
 4. **Checkpoint 2**: Thanh merges. Claude never merges or pushes to `main`.
 

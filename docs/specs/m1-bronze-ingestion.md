@@ -1,6 +1,6 @@
 # M1 Bronze ingestion: spec
 
-- Status: Open questions decided by Thanh on 2026-11-06; approved when PR #4 merges (Checkpoint 1)
+- Status: Approved at Checkpoint 1 (open questions decided by Thanh, PR #4 merged 2026-11-06)
 - Date: 2026-11-06
 - Build window: Tue 2026-11-10 to Sun 2026-12-20, about 6 weeks at 6 h/week (~36 h)
 

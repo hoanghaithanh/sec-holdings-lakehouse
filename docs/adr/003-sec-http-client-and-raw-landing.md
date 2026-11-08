@@ -1,6 +1,6 @@
 # ADR-003: SEC HTTP client and raw landing
 
-- Status: Proposed
+- Status: Accepted (Checkpoint 1, PR #4 merged 2026-11-06)
 - Date: 2026-11-06
 - Spec: `docs/specs/m1-bronze-ingestion.md`
 - Spec decisions it builds on: **Q2** (Source 2 not in M1, #5, but the client must be reusable

@@ -12,6 +12,10 @@
 - [ ] New or changed behaviour has tests (fixtures, no network)
 - [ ] Re-running the affected asset/partition is idempotent (if it writes data)
 
+## Agents run
+
+<!-- Which agents from .claude/agents/ ran on this PR and what they found, or "none (reason)". -->
+
 ## Notes for the reviewer
 
 <!-- Anything to look at closely, known limits, deferred work (with issue links). -->
