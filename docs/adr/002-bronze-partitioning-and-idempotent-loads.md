@@ -1,6 +1,6 @@
 # ADR-002: Bronze partitioning and idempotent loads for the 13F data sets
 
-- Status: Proposed
+- Status: Accepted (Checkpoint 1, PR #4 merged 2026-11-06)
 - Date: 2026-11-06
 - Spec: `docs/specs/m1-bronze-ingestion.md`
 - Spec decisions it builds on: **Q1** (partition per data set), **Q4** (all-string columns), **Q5**

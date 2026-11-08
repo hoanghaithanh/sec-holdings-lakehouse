@@ -1,6 +1,6 @@
 ---
 name: devops-engineer
-description: Use for CI workflow changes, Dockerfile and Docker Compose changes, environment config, and preparing a promotion to the homelab UAT environment.
+description: Use for CI workflow and runner changes, Dockerfile and Docker Compose changes, environment config, and preparing a promotion to the homelab UAT environment.
 tools: Read, Write, Edit, Bash, Grep, Glob, mcp__github__pull_request_read, mcp__github__issue_read, mcp__github__list_issues
 model: sonnet
 effort: medium
