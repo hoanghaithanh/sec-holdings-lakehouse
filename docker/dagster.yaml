@@ -20,9 +20,9 @@ run_coordinator:
   module: dagster.core.run_coordinator
   class: QueuedRunCoordinator
 
-# At most 2 runs at once. Steps in a pool share its slots across all runs: bronze_form13f uses
-# pool "delta_writes", and Delta on S3 is only safe with one writer per table (ADR-002), so each
-# pool gets 1 slot. The raw download asset has no pool, so a zip can download while Bronze loads.
+# At most 2 runs at once. Across all runs, at most 1 step in a given pool runs at a time:
+# bronze_form13f uses pool "delta_writes", and Delta on S3 is only safe with one writer per table
+# (ADR-002). The raw download asset has no pool, so a zip can download while Bronze loads.
 concurrency:
   runs:
     max_concurrent_runs: 2

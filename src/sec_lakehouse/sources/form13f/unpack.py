@@ -34,16 +34,15 @@ class UnpackedTable:
 
 def find_members(names: list[str]) -> tuple[dict[str, str], list[str]]:
     """Map each table to its member in the zip. Returns (table name -> member, unknown members)."""
-    by_stem: dict[str, str] = {}
+    by_stem: dict[str, list[str]] = {}
     for name in names:
         if name.endswith("/"):
             continue  # a folder entry
-        stem = PurePosixPath(name).stem.upper()
-        by_stem[stem] = name
+        by_stem.setdefault(PurePosixPath(name).stem.upper(), []).append(name)
     found: dict[str, str] = {}
     missing: list[str] = []
     for spec in TABLES:
-        matches = [by_stem[m] for m in spec.members if m in by_stem]
+        matches = [name for m in spec.members for name in by_stem.get(m, [])]
         if len(matches) != 1:
             missing.append(spec.members[0] if not matches else f"{spec.name} ({matches})")
             continue

@@ -70,6 +70,7 @@ def parse_staged(session: Any, uri: str, table: UnpackedTable) -> Any:
     can_subset=False,
     compute_kind="spark",
     # Delta on S3 is safe with one writer at a time (ADR-002); dagster.yaml limits the pool.
+    # One pool for every Bronze table, so at most one Bronze writer runs at a time.
     pool="delta_writes",
 )
 def bronze_form13f(
@@ -83,7 +84,9 @@ def bronze_form13f(
     zip_path = raw_zip_path(dataset)
     zip_uri = storage.uri(zip_path)
     staging = f"{STAGING_PREFIX}/{key}"
-    ingested_at = datetime.now(UTC).replace(tzinfo=None)
+    # Timezone-aware, so Spark stores the true UTC instant whatever the driver's OS timezone.
+    ingested_at = datetime.now(UTC)
+    run_id = context.run.run_id
     session = spark.get_session()
 
     storage.delete_prefix(staging)  # leftovers from a failed run
@@ -93,18 +96,26 @@ def bronze_form13f(
         tables = unpack(local_zip, Path(tmp_dir) / "unpacked")
         for table in tables:
             storage.put_staging(f"{staging}/{table.spec.name}.tsv", table.path)
+    # From here on only the staged copies exist; `table.path` points at a deleted temp file.
 
+    # Parse and check all 7 tables before writing any, so a bad row in one table never leaves
+    # the others half-replaced for this partition.
+    frames = []
     for table in tables:
         spec: TableSpec = table.spec
-        path = storage.table_path("bronze", bronze_table_name(spec))
         df = parse_staged(session, storage.uri(f"{staging}/{spec.name}.tsv"), table).select(
             *spec.columns,
             F.lit(key).alias("_dataset"),
             F.lit(f"{zip_uri}/{table.member}").alias("_source_file"),
             "_source_line",
             F.lit(ingested_at).cast("timestamp").alias("_ingested_at"),
-            F.lit(context.run_id).alias("_run_id"),
+            F.lit(run_id).alias("_run_id"),
         )
+        frames.append((table, df))
+
+    for table, df in frames:
+        spec = table.spec
+        path = storage.table_path("bronze", bronze_table_name(spec))
         (
             df.write.format("delta")
             .mode("overwrite")

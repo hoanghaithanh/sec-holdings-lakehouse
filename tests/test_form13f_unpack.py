@@ -92,7 +92,13 @@ def test_member_names_and_signatureblock_alias() -> None:
     assert unknown == ["FORM13F_metadata.json"]
 
 
-def test_missing_table_fails(tmp_path: Path) -> None:
+def test_duplicate_members_fail() -> None:
+    names = [f"{s.members[0]}.tsv" for s in TABLES] + ["old/INFOTABLE.txt"]
+    with pytest.raises(Form13fFormatError, match="duplicate"):
+        find_members(names)
+
+
+def test_missing_table_fails() -> None:
     names = [f"{s.members[0]}.tsv" for s in TABLES if s.name != "infotable"]
     with pytest.raises(Form13fFormatError, match="INFOTABLE"):
         find_members(names)
