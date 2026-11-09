@@ -156,3 +156,29 @@ def test_s3_client_uses_path_style_and_quiet_checksums() -> None:
     config = storage._s3_client().meta.config
     assert config.s3 is not None and config.s3["addressing_style"] == "path"
     assert config.request_checksum_calculation == "when_required"
+
+
+def test_staging_can_be_overwritten_and_deleted(tmp_path: Path) -> None:
+    storage = LakehouseStorage(root_uri=str(tmp_path / "lake"))
+    storage.put_staging("staging/form13f/2013q2/a.tsv", write(tmp_path, "one", b"first"))
+    storage.put_staging("staging/form13f/2013q2/a.tsv", write(tmp_path, "two", b"second"))
+    assert b"".join(storage.iter_bytes("staging/form13f/2013q2/a.tsv")) == b"second"
+    storage.delete_prefix("staging/form13f/2013q2")
+    assert not storage.exists("staging/form13f/2013q2/a.tsv")
+    storage.delete_prefix("staging/form13f/never-written")  # no error
+
+
+@pytest.mark.parametrize("bad", ["raw/a.zip", "bronze/form13f_submission", "staging", "staging/"])
+def test_only_staging_can_be_overwritten_or_deleted(tmp_path: Path, bad: str) -> None:
+    storage = LakehouseStorage(root_uri=str(tmp_path))
+    with pytest.raises(ValueError):
+        storage.delete_prefix(bad)
+    with pytest.raises(ValueError):
+        storage.put_staging(bad, write(tmp_path, "x", b"x"))
+
+
+def test_download_to_copies_a_stored_file(tmp_path: Path) -> None:
+    storage = LakehouseStorage(root_uri=str(tmp_path / "lake"))
+    storage.put_new("raw/a.zip", write(tmp_path, "a", b"zip"))
+    storage.download_to("raw/a.zip", tmp_path / "copy.zip")
+    assert (tmp_path / "copy.zip").read_bytes() == b"zip"
