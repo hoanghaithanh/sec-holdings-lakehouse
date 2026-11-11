@@ -176,6 +176,7 @@ a scratch Dagster instance: it queued exactly 54 runs, from `2013q2` to `2026-06
 | Test | What it proves |
 | --- | --- |
 | `test_checks_pass_and_warn_counts_are_recorded` | All 43 checks report; block checks pass on good data; DQ6 counts an orphan holding, DQ8 counts bad values, DQ7 counts accession numbers repeated in a second data set. Warn failures do not fail the run. |
+| `test_real_sample_loads_with_block_checks_passing` | Cuts of three real SEC zips (2013q2, 2022q4, 2026-06_2026-08, in `tests/fixtures/form13f/`) unpack against the declared columns and load with every block check passing. |
 | `test_blocking_check_fails_the_run_and_writes_nothing` | A duplicate key (DQ4), an empty INFOTABLE (DQ1) and a blank key (DQ3) each fail the run, name the check in the error, and leave no Bronze table behind. |
 
 The test zips now give row *i* of every table the same accession number, so keys are unique and
