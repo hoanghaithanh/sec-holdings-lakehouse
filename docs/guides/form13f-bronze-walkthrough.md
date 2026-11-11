@@ -107,13 +107,16 @@ flowchart TD
     stage --> parse[Spark parses all 7 tables]
     parse --> fields{Field counts right?}
     fields -- no --> fail2[Form13fFormatError<br/>names up to 5 bad lines, nothing written]
-    fields -- yes --> write[Write each table with replaceWhere]
-    write --> counts{Row counts match?}
-    counts -- no --> fail3[RuntimeError<br/>a rerun reloads the data set]
+    fields -- yes --> dq{Blocking checks pass?<br/>DQ1, DQ3, DQ4, DQ9}
+    dq -- no --> fail4[BronzeQualityError<br/>nothing written]
+    dq -- yes --> write[Write each table with replaceWhere]
+    write --> counts{Row counts match? DQ5}
+    counts -- no --> fail3[BronzeQualityError<br/>a rerun reloads the data set]
     counts -- yes --> done[Report 7 results, delete staging]
 ```
 
-The first two checks run before any write, so a failure there changes nothing. The last check
+The first three checks run before any write, so a failure there changes nothing. The data
+quality checks are explained in [Bronze checks and backfill](form13f-bronze-checks-and-backfill.md). The last check
 runs after each write. If it ever fails, rerunning the data set replaces its rows again, because
 `replaceWhere` makes every run start from a clean partition.
 
@@ -210,7 +213,7 @@ wrong.
 | Header columns differ from `schemas.py` | `check_header()` | SEC renaming a column must be a deliberate code change, never a silent null column. |
 | A line is not valid UTF-8 | `_lines()` | The error names the file and line number. |
 | A line has too many or too few fields | `parse_staged()` | Usually a tab or line break inside a value. Up to 5 line numbers are reported. |
-| Rows written differ from lines in the file | after each write | Proves nothing was dropped between the file and Delta. |
+| Rows written differ from lines in the file (DQ5) | after each write | Proves nothing was dropped between the file and Delta. |
 
 Three design choices keep reruns safe:
 
