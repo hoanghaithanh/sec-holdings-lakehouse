@@ -39,6 +39,7 @@ the object store. Docker cannot be built in Claude's cloud sandbox, so CI is the
 | Retros (3 lines per milestone) | `docs/retrospectives.md` |
 | Assets / resources | `src/sec_lakehouse/assets/`, `src/sec_lakehouse/resources/` |
 | Test fixtures (small real 13F samples) | `tests/fixtures/` |
+| Feature walkthroughs (explain a feature to a junior, with diagrams) | `docs/guides/<feature>.md` |
 
 ## Environments
 
@@ -79,6 +80,12 @@ workflow, so invoking these agents at the steps below is expected.
 
 **Build loop (every session)**
 1. The main session implements one small slice with its tests. There is no developer subagent.
+   Every PR that adds or changes a feature also adds or updates its walkthrough in `docs/guides/`
+   (Thanh asked for this on 2026-11-09). Write it for a junior developer: what the feature does and
+   why, a Mermaid class diagram, a flowchart of one run and a sequence diagram (pick the ones that
+   fit), a step-by-step tour of the code, the safety checks, the tests and a short glossary. Check
+   that the Mermaid blocks render. A small fix or a docs-only PR doesn't need one.
+   Example: `docs/guides/form13f-bronze-walkthrough.md`.
 2. `code-reviewer` reviews the diff. Fix Blockers and Majors before opening or updating the PR.
    Ops changes (CI workflows, Docker, Compose, Makefile, env examples) also get `devops-engineer`.
    When CI workflows (they can reach the self-hosted runner), Compose, env examples, secrets, ports,

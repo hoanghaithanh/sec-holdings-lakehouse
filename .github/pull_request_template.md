@@ -11,6 +11,7 @@
 - [ ] `make check` passes locally (lint, types, tests, Dagster validation)
 - [ ] New or changed behaviour has tests (fixtures, no network)
 - [ ] Re-running the affected asset/partition is idempotent (if it writes data)
+- [ ] Feature walkthrough added or updated in `docs/guides/` (junior-friendly, Mermaid diagrams; skip for a small fix)
 
 ## Agents run
 

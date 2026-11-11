@@ -120,6 +120,40 @@ class LakehouseStorage(ConfigurableResource):  # type: ignore[type-arg]
             size += len(chunk)
         return digest.hexdigest(), size
 
+    def download_to(self, path: str, dest: str | os.PathLike[str]) -> None:
+        """Copy a stored file to a local path (zip readers need a seekable local file)."""
+        with open(dest, "wb") as handle:
+            for chunk in self.iter_bytes(path):
+                handle.write(chunk)
+
+    # --- staging (scratch space, overwritable) -----------------------------------------------
+
+    def put_staging(self, path: str, source: str | os.PathLike[str]) -> None:
+        """Store a scratch file under staging/, replacing any earlier copy."""
+        path = _check_staging(path)
+        if not self.is_object_store:
+            target = self._local(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            return
+        bucket, key = self._bucket_key(path)
+        self._s3_client().upload_file(os.fspath(source), bucket, key)
+
+    def delete_prefix(self, prefix: str) -> None:
+        """Delete everything under a staging/ prefix. Refuses any other prefix."""
+        prefix = _check_staging(prefix.rstrip("/"))
+        if not self.is_object_store:
+            shutil.rmtree(self._local(prefix), ignore_errors=True)
+            return
+        bucket, key = self._bucket_key(prefix)
+        client = self._s3_client()
+        for page in client.get_paginator("list_objects_v2").paginate(
+            Bucket=bucket, Prefix=key + "/"
+        ):
+            objects = [{"Key": item["Key"]} for item in page.get("Contents", [])]
+            if objects:
+                client.delete_objects(Bucket=bucket, Delete={"Objects": objects})  # type: ignore[typeddict-item]
+
     # --- internals ---------------------------------------------------------------------------
 
     def _local(self, path: str) -> Path:
@@ -166,4 +200,11 @@ def _check_path(path: str) -> str:
         or any(segment in {"", ".", ".."} for segment in segments)
     ):
         raise ValueError(f"invalid storage path: {path!r}")
+    return path
+
+
+def _check_staging(path: str) -> str:
+    path = _check_path(path)
+    if not path.startswith("staging/") or path == "staging/":
+        raise ValueError(f"only paths under staging/ can be overwritten or deleted, got {path!r}")
     return path

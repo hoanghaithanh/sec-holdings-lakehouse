@@ -81,6 +81,26 @@ class FakeS3:
 
         return {"Body": Body()}
 
+    def get_paginator(self, name: str) -> Any:
+        objects = self.objects
+
+        class Paginator:
+            def paginate(self, Bucket: str, Prefix: str) -> list[dict[str, Any]]:
+                keys = sorted(k for b, k in objects if b == Bucket and k.startswith(Prefix))
+                # Two pages, to exercise pagination.
+                return [
+                    {"Contents": [{"Key": k} for k in keys[:1]]},
+                    {"Contents": [{"Key": k} for k in keys[1:]]},
+                ]
+
+        assert name == "list_objects_v2"
+        return Paginator()
+
+    def delete_objects(self, Bucket: str, Delete: dict[str, Any]) -> dict[str, Any]:
+        for item in Delete["Objects"]:
+            del self.objects[(Bucket, item["Key"])]
+        return {}
+
 
 def s3_storage(root: str = "s3a://lakehouse") -> tuple[LakehouseStorage, FakeS3]:
     storage = LakehouseStorage(root_uri=root, s3_endpoint="http://object-store:9000")
@@ -156,3 +176,46 @@ def test_s3_client_uses_path_style_and_quiet_checksums() -> None:
     config = storage._s3_client().meta.config
     assert config.s3 is not None and config.s3["addressing_style"] == "path"
     assert config.request_checksum_calculation == "when_required"
+
+
+def test_staging_can_be_overwritten_and_deleted(tmp_path: Path) -> None:
+    storage = LakehouseStorage(root_uri=str(tmp_path / "lake"))
+    storage.put_staging("staging/form13f/2013q2/a.tsv", write(tmp_path, "one", b"first"))
+    storage.put_staging("staging/form13f/2013q2/a.tsv", write(tmp_path, "two", b"second"))
+    assert b"".join(storage.iter_bytes("staging/form13f/2013q2/a.tsv")) == b"second"
+    storage.delete_prefix("staging/form13f/2013q2")
+    assert not storage.exists("staging/form13f/2013q2/a.tsv")
+    storage.delete_prefix("staging/form13f/never-written")  # no error
+
+
+@pytest.mark.parametrize("bad", ["raw/a.zip", "bronze/form13f_submission", "staging", "staging/"])
+def test_only_staging_can_be_overwritten_or_deleted(tmp_path: Path, bad: str) -> None:
+    storage = LakehouseStorage(root_uri=str(tmp_path))
+    with pytest.raises(ValueError):
+        storage.delete_prefix(bad)
+    with pytest.raises(ValueError):
+        storage.put_staging(bad, write(tmp_path, "x", b"x"))
+
+
+def test_download_to_copies_a_stored_file(tmp_path: Path) -> None:
+    storage = LakehouseStorage(root_uri=str(tmp_path / "lake"))
+    storage.put_new("raw/a.zip", write(tmp_path, "a", b"zip"))
+    storage.download_to("raw/a.zip", tmp_path / "copy.zip")
+    assert (tmp_path / "copy.zip").read_bytes() == b"zip"
+
+
+def test_s3_staging_overwrite_and_delete_prefix(tmp_path: Path) -> None:
+    storage, fake = s3_storage()
+    for name in ["a.tsv", "b.tsv", "c.tsv"]:
+        storage.put_staging(f"staging/form13f/2013q2/{name}", write(tmp_path, name, b"x"))
+    storage.put_staging("staging/form13f/2013q2/a.tsv", write(tmp_path, "a2", b"new"))
+    storage.put_staging("staging/form13f/2013q2x/a.tsv", write(tmp_path, "sib", b"keep"))
+    storage.put_new("raw/a.zip", write(tmp_path, "raw", b"raw"))
+    assert fake.objects[("lakehouse", "staging/form13f/2013q2/a.tsv")] == b"new"
+
+    storage.delete_prefix("staging/form13f/2013q2")
+
+    assert sorted(k for _, k in fake.objects) == [
+        "raw/a.zip",
+        "staging/form13f/2013q2x/a.tsv",  # a sibling prefix is not deleted
+    ]
