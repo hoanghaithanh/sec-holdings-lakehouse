@@ -8,16 +8,17 @@ import zipfile
 from sec_lakehouse.sources.form13f.schemas import TABLES, TableSpec
 
 
-def table_lines(spec: TableSpec, rows: int, accession: str = "0000950123-13-000001") -> list[str]:
+def table_lines(spec: TableSpec, rows: int) -> list[str]:
+    """Row i of every table belongs to filing i, so keys are unique and every table joins."""
     header = "\t".join(c.upper() for c in spec.columns)
     lines = [header]
     for i in range(rows):
         values = []
         for column in spec.columns:
             if column == "accession_number":
-                values.append(accession)
+                values.append(f"0000950123-13-{i + 1:06d}")
             elif column.endswith("_sk") or column == "sequencenumber":
-                values.append(str(i + 1))
+                values.append("1")
             else:
                 values.append(f"{column} {i}")
         lines.append("\t".join(values))
