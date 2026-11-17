@@ -18,6 +18,10 @@ x-worker: &worker
       -Dspark.worker.cleanup.enabled=true
       -Dspark.worker.cleanup.interval=3600
       -Dspark.worker.cleanup.appDataTtl=86400
+    # Keep worker scratch off the SSD: app work dirs (jars, executor logs) and shuffle/spill
+    # files go to /spark, which each worker bind-mounts from the RAID array (volumes below).
+    SPARK_WORKER_DIR: /spark/work
+    SPARK_LOCAL_DIRS: /spark/local
   command:
     - spark-class
     - org.apache.spark.deploy.worker.Worker
@@ -36,8 +40,12 @@ services:
     ports:
       - "${SPARK_UI_PORT:-8080}:8080" # Spark master UI (8080 is taken on the homelab, .env.uat sets 8090)
 
-  spark-worker-1: *worker
-  spark-worker-2: *worker
+  spark-worker-1:
+    <<: *worker
+    volumes: [spark-worker-1-data:/spark]
+  spark-worker-2:
+    <<: *worker
+    volumes: [spark-worker-2-data:/spark]
 
   dagster-daemon:
     environment:
@@ -49,7 +57,8 @@ services:
         condition: service_started
 
 # Keep lakehouse data on the big disk, not under /var/lib/docker on the SSD.
-# Create the folders before the first `up`: mkdir -p $LAKEHOUSE_DATA_DIR/postgres $LAKEHOUSE_DATA_DIR/object-store
+# Create the folders before the first `up`, with /mnt/md0 mounted (docs/runbooks/uat-deploy.md):
+# mkdir -p $LAKEHOUSE_DATA_DIR/{postgres,object-store,spark-worker-1,spark-worker-2}
 volumes:
   postgres-data:
     driver_opts:
@@ -61,3 +70,13 @@ volumes:
       type: none
       o: bind
       device: ${LAKEHOUSE_DATA_DIR:?set LAKEHOUSE_DATA_DIR in .env.uat}/object-store
+  spark-worker-1-data:
+    driver_opts:
+      type: none
+      o: bind
+      device: ${LAKEHOUSE_DATA_DIR:?set LAKEHOUSE_DATA_DIR in .env.uat}/spark-worker-1
+  spark-worker-2-data:
+    driver_opts:
+      type: none
+      o: bind
+      device: ${LAKEHOUSE_DATA_DIR:?set LAKEHOUSE_DATA_DIR in .env.uat}/spark-worker-2
