@@ -1,6 +1,6 @@
 # M2 Silver: spec
 
-- Status: Draft, awaiting Checkpoint 1
+- Status: Approved at Checkpoint 1 (Thanh accepted all recommended answers, 2026-11-17)
 - Date: 2026-11-17
 - Build window: Tue 2026-11-17 to Sun 2027-01-10, about 8 calendar weeks, ~40 h (6 h/week, with a
   light holiday dip from Dec 21 to Jan 3). Roadmap deadline for M2 is still 2027-01-31, which is
@@ -547,7 +547,27 @@ additions or only unclassified amendments have no BASE, so "exactly one BASE" wo
 
 ## Decisions
 
-To be filled at Checkpoint 1.
+All thirteen open questions were settled on the recommended answers (Thanh, 2026-11-17).
+
+- **Q1** Silver filing and holding tables are Delta-partitioned by `period_of_report`. The Dagster
+  partition stays one per Bronze data set, and quarantine is partitioned by `_dataset`.
+- **Q2** Effective holdings live in a filing-level `silver.form13f_filing_effective` table. The
+  holding-level view is a Gold task.
+- **Q3** Source 2 (#5) is not in M2. Revisit after M2 sign-off.
+- **Q4** Any quarantined row is a warning. A data set is blocked above 1% quarantined rows, and S4
+  tunes that threshold on real data.
+- **Q5** The core covers filing, holding, quarantine and effective. The other-manager tables are
+  stretch slice S6, and `signature` stays Bronze only.
+- **Q6** For a key in more than one data set, the latest `_dataset` wins.
+- **Q7** A notice amendment never empties an earlier holdings report. These cases are counted as a
+  warning.
+- **Q8** M2 acceptance on UAT runs only after M1 is signed off.
+- **Q9** SDQ8 and AC11 need exactly one BASE only where a base candidate exists. Other groups are a
+  warn count.
+- **Q10** The Q7 warning is recorded as SDQ8 metadata.
+- **Q11** Quarantine threshold overrides go in a reviewed per-data-set map in code.
+- **Q12** COVERPAGE and SUMMARYPAGE rows with no SUBMISSION row are quarantined as `NO_FILING`.
+- **Q13** S3 adds a warn count for quarantined restatements.
 
 ## Candidate ADRs for the architect
 

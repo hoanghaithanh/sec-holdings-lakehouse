@@ -1,6 +1,6 @@
 # ADR-005: Silver keys, layout, write strategy and quarantine
 
-- Status: Proposed (awaiting Checkpoint 1)
+- Status: Accepted (Checkpoint 1, Thanh accepted the spec's recommended answers on 2026-11-17)
 - Date: 2026-11-17
 - Spec: `docs/specs/m2-silver.md` (draft)
 - Depends on spec answers: designed on the spec's recommended answers, which Thanh has not
