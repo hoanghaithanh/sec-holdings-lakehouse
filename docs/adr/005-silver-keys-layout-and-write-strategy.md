@@ -132,14 +132,19 @@ The holding `MERGE` (the filing one is the same on `accession_number`):
 
 ```python
 periods = ", ".join(f"DATE'{p}'" for p in p_x)  # literal list: this is what prunes
-(DeltaTable.forPath(session, holding_path).alias("t")
-    .merge(changes.alias("s"),
-           f"t.period_of_report IN ({periods}) "
-           "AND t.accession_number = s.accession_number AND t.infotable_sk = s.infotable_sk")
+(
+    DeltaTable.forPath(session, holding_path)
+    .alias("t")
+    .merge(
+        changes.alias("s"),
+        f"t.period_of_report IN ({periods}) "
+        "AND t.accession_number = s.accession_number AND t.infotable_sk = s.infotable_sk",
+    )
     .whenMatchedDelete(condition="s._op = 'D'")
     .whenMatchedUpdate(condition="s._op = 'U'", set=columns)
     .whenNotMatchedInsert(condition="s._op = 'U'", values=columns)
-    .execute())
+    .execute()
+)
 ```
 
 Each target row matches at most one change row (both sides are unique on the key: Bronze DQ4

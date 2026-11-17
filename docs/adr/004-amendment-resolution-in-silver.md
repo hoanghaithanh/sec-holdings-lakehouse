@@ -110,7 +110,7 @@ the last tie-break, which makes the order total and the result deterministic. Ov
 `partitionBy(cik, period_of_report)` (no ordering, whole group):
 
 ```python
-base_ord = F.max(F.when(kind == "BASE_CANDIDATE", ord)).over(group)   # null if none
+base_ord = F.max(F.when(kind == "BASE_CANDIDATE", ord)).over(group)  # null if none
 ```
 
 | Kind | Condition | `effective_role` | Links |
