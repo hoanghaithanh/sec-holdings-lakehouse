@@ -3,12 +3,15 @@
 Column names and order follow the SEC readme (https://www.sec.gov/files/form_13f_readme.pdf,
 read on 2026-11-09), lower-cased. Bronze stores every column as a string, exactly as in the file.
 
-Not yet checked against a real zip (sec.gov is blocked from the build sandbox), so the first
-real load confirms three assumptions, each of which fails loudly rather than silently if wrong:
+Checked on 2026-11-11 against three real zips (2013q2, 2022q4, 2026-06_2026-08): every member
+name and header matched; samples are in tests/fixtures/form13f. Each rule still fails loudly
+rather than silently if a later zip differs:
 - Each table is a member named after it (`SUBMISSION.tsv`); the extension is not checked.
-  The readme calls the signature table both SIGNATURE and SIGNATUREBLOCK, so both are accepted.
+  The readme calls the signature table both SIGNATURE and SIGNATUREBLOCK, so both are accepted
+  (the real zips all use SIGNATURE). Other members (`FORM13F_metadata.json`, the readme) are
+  logged and skipped.
 - Header names match the readme. Headers are matched by name, not position.
-- `figi` may be missing from older data sets (FIGI was added to the 13F XML later). Only
+- `figi` is optional in case a data set lacks it, although all three real zips have it. Only
   columns listed in `optional` may be missing; they load as null. Any other missing or extra
   column fails the partition.
 """
