@@ -30,12 +30,21 @@ Checks come in two levels:
 | DQ1 | At least one row | submission, coverpage, summarypage, signature, infotable | block |
 | DQ2 | Row count recorded (may be 0) | othermanager, othermanager2 | warn |
 | DQ3 | Key columns not null or empty | all 7 | block |
-| DQ4 | Key unique within the data set | all 7 | block |
+| DQ4 | Key unique within the data set | all 7 | block (warn on othermanager2, see below) |
 | DQ5 | Rows written equal the data lines in the file | all 7 | block |
 | DQ6 | Accession numbers missing from SUBMISSION | all but submission | warn |
 | DQ7 | Accession numbers also in another data set | submission | warn |
 | DQ8 | `cusip` not 9 characters; `value`, `sshprnamt` not whole numbers | infotable | warn |
 | DQ9 | Metadata columns filled; `_dataset` equals the partition | all 7 | block |
+
+**Why DQ4 only warns on othermanager2.** The first UAT backfill with these checks (2026-11-17)
+stopped on DQ4 for OTHERMANAGER2 in every data set. The data isn't broken. Some filings give the
+same `sequencenumber` to several different managers, up to 13 in one 2013q2 filing, so
+`(accession_number, sequencenumber)` is not a real key there. Bronze's job is to keep what SEC
+published, so DQ4 still counts those keys (`duplicate_keys` in the check metadata) but no longer
+stops the run. Silver decides how to treat them. In code, `Check.warn_tables` lists the tables
+where a blocking check only warns, and `Check.blocks(table)` answers "does this failure stop the
+run?".
 
 ## Where the checks run
 
@@ -79,7 +88,7 @@ classDiagram
         <<module>>
         CHECKS: tuple~Check~
         check_specs(asset_keys) list~AssetCheckSpec~
-        check_result(check_id, asset_key, dataset, failures) AssetCheckResult
+        check_result(check_id, asset_key, dataset, failures, table) AssetCheckResult
         table_metrics(df, spec, key) dict
         orphan_accessions(df, submission) int
         shared_accessions(submission, existing, key) int
@@ -109,7 +118,8 @@ classDiagram
 - `src/sec_lakehouse/assets/form13f_checks.py` lists the 9 checks once, in `CHECKS`.
   `check_specs()` turns that list into Dagster `AssetCheckSpec`s, one per check and table, and
   `check_result()` turns a count of failures into an `AssetCheckResult` (0 failures = passed). Block
-  checks report with severity ERROR, warn checks with WARN. Each result also carries the data set
+  checks report with severity ERROR, warn checks with WARN, and a block check on one of its
+  `warn_tables` reports WARN too. Each result also carries the data set
   key, because Dagster keeps check history per asset, not per partition.
 - The metric functions each run **one Spark aggregation** and bring back a single row, so nothing
   big ever reaches the driver.

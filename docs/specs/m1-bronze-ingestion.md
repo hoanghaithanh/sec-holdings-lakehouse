@@ -145,7 +145,7 @@ Checks marked **block** fail the asset; **warn** record a number and let the run
 | DQ1 | Row count > 0 for the partition | submission, coverpage, summarypage, signature, infotable | block |
 | DQ2 | Row count >= 0 is recorded (can be empty) | othermanager, othermanager2 | warn |
 | DQ3 | Source key not null and not empty | all | block |
-| DQ4 | Source key unique within `_dataset` | all | block |
+| DQ4 | Source key unique within `_dataset` | all | block; warn on othermanager2 (*amended 2026-11-17*: real data repeats its key, Thanh's decision) |
 | DQ5 | Rows loaded = data lines in the TSV (lines minus header) per file | all | block |
 | DQ6 | Every `accession_number` in infotable, coverpage, summarypage, signature, othermanager(2) exists in submission for the same `_dataset` | all except submission | warn (count of orphans) |
 | DQ7 | Number of `accession_number`s in this partition that also exist in another partition | submission | warn |

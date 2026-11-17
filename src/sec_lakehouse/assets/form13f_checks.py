@@ -1,9 +1,14 @@
 """Data quality checks DQ1 to DQ9 for the Bronze 13F tables (spec, "Data quality rules").
 
 The checks run inside `bronze_form13f`, on the parsed data of one data set:
-- block checks (DQ1, DQ3, DQ4, DQ9) run before any table is written, so a failing data set
-  never replaces what Bronze already holds; DQ5 compares the rows written with the file;
+- block checks (DQ1, DQ3, DQ4 except on othermanager2, DQ9) run before any table is written,
+  so a failing data set never replaces what Bronze already holds; DQ5 compares the rows written
+  with the file;
 - warn checks (DQ2, DQ6, DQ7, DQ8) only record a count and let the run continue.
+
+A block check can be a warning for some tables (`warn_tables`). DQ4 warns on OTHERMANAGER2: on
+UAT (2026-11-17) all 54 real data sets repeat `(accession_number, sequencenumber)` for different
+managers in the same filing, so Bronze keeps those rows as SEC published them and counts them.
 
 Every metric is one Spark aggregation that returns a single row, so nothing unbounded reaches
 the driver.
@@ -32,6 +37,11 @@ class Check:
     description: str
     blocking: bool
     tables: frozenset[str]
+    warn_tables: frozenset[str] = frozenset()  # tables where a blocking check only warns
+
+    def blocks(self, table: str) -> bool:
+        """Whether a failure of this check on `table` stops the run."""
+        return self.blocking and table not in self.warn_tables
 
 
 ALL_TABLES = frozenset(spec.name for spec in TABLES)
@@ -55,9 +65,10 @@ CHECKS: tuple[Check, ...] = (
     Check(
         "DQ4",
         "dq4_key_unique",
-        "DQ4: the source key is unique within the data set.",
+        "DQ4: the source key is unique within the data set (warn only on othermanager2).",
         True,
         ALL_TABLES,
+        warn_tables=frozenset({"othermanager2"}),
     ),
     Check(
         "DQ5",
@@ -105,7 +116,7 @@ def check_specs(asset_keys: dict[str, AssetKey]) -> list[AssetCheckSpec]:
             check.name,
             asset=asset_keys[table],
             description=check.description,
-            blocking=check.blocking,
+            blocking=check.blocks(table),
         )
         for check in CHECKS
         for table in sorted(check.tables)
@@ -113,7 +124,13 @@ def check_specs(asset_keys: dict[str, AssetKey]) -> list[AssetCheckSpec]:
 
 
 def check_result(
-    check_id: str, asset_key: AssetKey, dataset: str, failures: int, **counts: int
+    check_id: str,
+    asset_key: AssetKey,
+    dataset: str,
+    failures: int,
+    *,
+    table: str,
+    **counts: int,
 ) -> AssetCheckResult:
     """A check result where `failures` is the number of offending rows or keys (0 = pass).
 
@@ -121,13 +138,15 @@ def check_result(
     partition: without it, the counts of 54 data sets could not be told apart.
     """
     check = CHECKS_BY_ID[check_id]
+    if table not in check.tables:
+        raise ValueError(f"{check.name} is not declared for table {table!r}")
     metadata: dict[str, MetadataValue] = {"dataset": MetadataValue.text(dataset)}
     metadata.update({name: MetadataValue.int(value) for name, value in counts.items()})
     return AssetCheckResult(
         asset_key=asset_key,
         check_name=check.name,
         passed=failures == 0,
-        severity=AssetCheckSeverity.ERROR if check.blocking else AssetCheckSeverity.WARN,
+        severity=AssetCheckSeverity.ERROR if check.blocks(table) else AssetCheckSeverity.WARN,
         metadata=metadata,
     )
 

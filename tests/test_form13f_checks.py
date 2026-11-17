@@ -10,6 +10,8 @@ import pytest
 from sec_lakehouse.assets.form13f_bronze import BRONZE_KEYS
 from sec_lakehouse.assets.form13f_checks import (
     CHECKS,
+    CHECKS_BY_ID,
+    check_result,
     check_specs,
     infotable_value_problems,
     table_metrics,
@@ -24,6 +26,8 @@ SPECS = {spec.name: spec for spec in TABLES}
 ALL = {spec.name for spec in TABLES}
 
 # The spec's "Data quality rules" table: check -> (tables, blocks the run).
+# Exception: DQ4 only warns on othermanager2 (real data repeats its key; checked on UAT 2026-11-17).
+WARN_ONLY = {("dq4_key_unique", "othermanager2")}
 EXPECTED = {
     "dq1_has_rows": ({"submission", "coverpage", "summarypage", "signature", "infotable"}, True),
     "dq2_row_count": ({"othermanager", "othermanager2"}, False),
@@ -41,8 +45,10 @@ def test_check_specs_match_the_spec_table() -> None:
     specs = check_specs(BRONZE_KEYS)
     found: dict[str, set[str]] = {}
     for spec in specs:
-        found.setdefault(spec.name, set()).add(spec.asset_key.path[-1].removeprefix("form13f_"))
-        assert spec.blocking is EXPECTED[spec.name][1], spec.name
+        table = spec.asset_key.path[-1].removeprefix("form13f_")
+        found.setdefault(spec.name, set()).add(table)
+        expected = EXPECTED[spec.name][1] and (spec.name, table) not in WARN_ONLY
+        assert spec.blocking is expected, (spec.name, table)
     assert found == {name: tables for name, (tables, _) in EXPECTED.items()}
     assert len(specs) == 43 and len(CHECKS) == 9
 
@@ -96,3 +102,12 @@ def test_infotable_value_problems_counts_each_column(session: Any) -> None:
         "cusip string, value string, sshprnamt string",
     )
     assert infotable_value_problems(df) == {"cusip": 2, "value": 3, "sshprnamt": 2}
+
+
+def test_dq4_warns_only_on_othermanager2() -> None:
+    dq4 = CHECKS_BY_ID["DQ4"]
+    assert not dq4.blocks("othermanager2")
+    assert all(dq4.blocks(table) for table in ALL - {"othermanager2"})
+    assert check_result("DQ4", BRONZE_KEYS["othermanager2"], "2013q2", 1, table="othermanager2")
+    with pytest.raises(ValueError, match="not declared"):
+        check_result("DQ8", BRONZE_KEYS["submission"], "2013q2", 0, table="submission")

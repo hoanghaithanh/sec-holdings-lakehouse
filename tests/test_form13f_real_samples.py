@@ -81,7 +81,11 @@ def test_real_sample_loads_with_block_checks_passing(
     assert len(checks) == 43
     for (table, name), evaluation in checks.items():
         if name in {"dq1_has_rows", "dq3_key_not_null", "dq4_key_unique", "dq9_metadata_valid"}:
-            assert evaluation.passed, (table, name)
+            # DQ4 only warns on othermanager2: real filings repeat its key.
+            assert evaluation.passed or (table, name) == ("othermanager2", "dq4_key_unique"), (
+                table,
+                name,
+            )
         if name == "dq5_rows_match_file":
             assert evaluation.passed, table
             assert evaluation.metadata["written"].value == EXPECTED[key][table]
