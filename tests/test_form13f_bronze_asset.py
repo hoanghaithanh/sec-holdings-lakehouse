@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from dagster import materialize
+from dagster import AssetCheckSeverity, materialize
 from form13f_zips import build_zip, table_lines
 
 from sec_lakehouse.assets.form13f_bronze import BRONZE_KEYS, bronze_form13f
@@ -330,6 +330,27 @@ def test_blocking_check_fails_the_run_and_writes_nothing(
     failure = next(e for e in result.all_events if e.is_step_failure)
     assert f"{check} on {table}" in str(failure.event_specific_data.error)
     assert not (tmp_path / "lake/bronze").exists()
+
+
+def test_duplicate_othermanager2_key_warns_and_keeps_both_rows(
+    tmp_path: Path, storage: LakehouseStorage, spark_resource: SparkResource
+) -> None:
+    # Real case (2013q2 on UAT): accession 0000728889-13-000870 lists sequence number 7 for 13
+    # different managers. Bronze keeps every row as published and DQ4 only counts the key.
+    lines = table_lines(SPECS["othermanager2"], 2)
+    copy = lines[1].split("\t")
+    copy[SPECS["othermanager2"].columns.index("name")] = "another manager"
+    lines.append("\t".join(copy))
+    land(storage, tmp_path, "2013q2", build_zip(rows=2, overrides={"othermanager2": lines}))
+    result = evaluations(load(storage, spark_resource, "2013q2"))
+
+    dq4 = result[("othermanager2", "dq4_key_unique")]
+    assert not dq4.passed
+    assert dq4.severity == AssetCheckSeverity.WARN
+    assert dq4.metadata["duplicate_keys"].value == 1
+    assert result[("othermanager2", "dq5_rows_match_file")].passed
+    assert read(spark_resource, storage, "form13f_othermanager2").count() == 3
+    assert result[("submission", "dq4_key_unique")].severity == AssetCheckSeverity.ERROR
 
 
 def test_blocked_rerun_keeps_the_previous_load(

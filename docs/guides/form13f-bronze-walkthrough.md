@@ -107,7 +107,7 @@ flowchart TD
     stage --> parse[Spark parses all 7 tables]
     parse --> fields{Field counts right?}
     fields -- no --> fail2[Form13fFormatError<br/>names up to 5 bad lines, nothing written]
-    fields -- yes --> dq{Blocking checks pass?<br/>DQ1, DQ3, DQ4, DQ9}
+    fields -- yes --> dq{Blocking checks pass?<br/>DQ1, DQ3, DQ4, DQ9<br/>DQ4 only warns on othermanager2}
     dq -- no --> fail4[BronzeQualityError<br/>nothing written]
     dq -- yes --> write[Write each table with replaceWhere]
     write --> counts{Row counts match? DQ5}

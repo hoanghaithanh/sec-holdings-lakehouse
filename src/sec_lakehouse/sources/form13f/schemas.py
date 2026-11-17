@@ -104,7 +104,9 @@ TABLES: tuple[TableSpec, ...] = (
         "othermanager2",
         ("OTHERMANAGER2",),
         ("accession_number", "sequencenumber", *_MANAGER_IDS),
-        ("accession_number", "sequencenumber"),  # readme marks only accession_number: unverified
+        # Not unique in real data: filings reuse a sequence number for different managers, so
+        # DQ4 only warns on this table (checked on UAT, 2026-11-17).
+        ("accession_number", "sequencenumber"),
     ),
     TableSpec(
         "infotable",

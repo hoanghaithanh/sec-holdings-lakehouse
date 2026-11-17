@@ -84,7 +84,8 @@ and each Bronze table replaces only that data set's rows (`replaceWhere`). Other
 their rows, `_ingested_at` and `_run_id`.
 
 If a blocking check (DQ1, DQ3, DQ4, DQ9) fails, nothing is written and Bronze keeps the previous
-load of that data set. If DQ5 fails (rows written differ from the file), the run fails after the
+load of that data set. DQ4 on othermanager2 is only a warning: real filings repeat its key, so
+expect a non-zero `duplicate_keys` count there in every data set. If DQ5 fails (rows written differ from the file), the run fails after the
 write; rerun the data set once the cause is fixed.
 
 ## Pick up a zip that SEC republished
@@ -152,5 +153,5 @@ rerun that data set.
 | `Form13fFormatError: zip is missing or has duplicate tables` | SEC changed the zip layout | Compare the zip with `sources/form13f/schemas.py`; change it in a PR. |
 | `Form13fFormatError: ... header does not match` | A column was renamed, added or dropped | Same: update `schemas.py` on purpose. |
 | `Form13fFormatError: ... lines [...] do not have N fields` | A tab or line break inside a value | Look at those lines in the zip; the parser needs a fix. |
-| `BronzeQualityError: blocking checks failed` | DQ1, DQ3, DQ4 or DQ9 failed | Nothing was written. The message names the check and the table. |
+| `BronzeQualityError: blocking checks failed` | DQ1, DQ3, DQ4 (not on othermanager2) or DQ9 failed | Nothing was written. The message names the check and the table. |
 | `BronzeQualityError: ... wrote N rows but the file has M` | DQ5 failed | Rerun once; if it repeats, open an issue with the run id. |

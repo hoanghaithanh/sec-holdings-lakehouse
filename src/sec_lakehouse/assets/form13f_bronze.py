@@ -43,7 +43,7 @@ STAGING_PREFIX = "staging/form13f"
 
 
 class BronzeQualityError(RuntimeError):
-    """A blocking data quality check failed (spec DQ1, DQ3, DQ4, DQ5, DQ9)."""
+    """A blocking data quality check failed (DQ1, DQ3, DQ4 except on othermanager2, DQ5, DQ9)."""
 
 
 def read_bronze(session: Any, path: str) -> Any | None:
@@ -66,7 +66,7 @@ def pre_write_checks(
         asset_key = BRONZE_KEYS[name]
 
         def result(check_id: str, failures: int, **counts: int) -> AssetCheckResult:
-            return check_result(check_id, asset_key, key, failures, **counts)  # noqa: B023
+            return check_result(check_id, asset_key, key, failures, table=name, **counts)  # noqa: B023
 
         m = table_metrics(df, table.spec, key)
         if name in MUST_HAVE_ROWS:
@@ -235,6 +235,7 @@ def bronze_form13f(
                 asset_key,
                 key,
                 abs(written - table.rows),
+                table=spec.name,
                 written=written,
                 file_lines=table.rows,
             )
