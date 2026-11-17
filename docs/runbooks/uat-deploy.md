@@ -69,23 +69,37 @@ Spark when each app ends.
 
 ### One-time setup for the Spark worker folders
 
-Do this on the server **before merging** the PR that adds the worker volumes. The deploy after
-the merge recreates the workers, and they won't start if the folders are missing.
+Do this on the server **before merging** the PR that adds the worker volumes. The automatic deploy
+after the merge is the first thing that needs these folders, and there is no step in between.
 
 ```bash
 cd ~/sec-lakehouse
-mountpoint -q /mnt/md0 && echo mounted || echo "NOT MOUNTED, stop here"
-set -a; . ./.env.uat; set +a
-mkdir -p "$LAKEHOUSE_DATA_DIR/spark-worker-1" "$LAKEHOUSE_DATA_DIR/spark-worker-2"
+D="$(grep '^LAKEHOUSE_DATA_DIR=' .env.uat | cut -d= -f2-)"
+# Each step runs only if the one before worked. mkdir has no -p, so it fails unless $D
+# already exists, and $D only exists on the mounted array. chmod: executor logs land here.
+mountpoint -q /mnt/md0 \
+  && mkdir "${D:?}/spark-worker-1" "${D:?}/spark-worker-2" \
+  && chmod 700 "$D/spark-worker-1" "$D/spark-worker-2" \
+  && echo done || echo "STOPPED: is /mnt/md0 mounted and LAKEHOUSE_DATA_DIR set?"
 ```
 
-After the deploy, check that the workers write to the RAID array and not the SSD:
+If the folders are missing when the deploy runs, Compose still creates the volumes (the bind
+path is only checked when a container starts), the workers fail to start with a mount error,
+and the **Deploy UAT** job goes red, possibly after other services were already recreated on the
+new image. Create the folders, then re-run the failed **Deploy UAT** run from the Actions tab.
+
+Spark writes these folders as root, so deleting anything under them by hand needs `sudo`.
+`local/` is normally emptied when each app ends, but a killed worker or executor can leave
+`spark-*` folders behind, so glance at `sudo du -sh "$D"/spark-worker-*/local` now and then.
+
+After the deploy, check that the workers write to the RAID array and not the SSD (with `D` set
+as above):
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.uat.yml --env-file .env.uat \
   exec spark-worker-1 sh -c 'df -h /spark && env | grep -E "SPARK_(WORKER_DIR|LOCAL_DIRS)"'
-du -sh "$LAKEHOUSE_DATA_DIR"/spark-worker-*   # grows while a backfill runs
-df -h /                                        # should stay flat
+sudo du -sh "$D"/spark-worker-*   # grows while a backfill runs
+df -h /                           # should stay flat
 ```
 
 ### If `/mnt/md0` is not mounted at boot
@@ -96,12 +110,13 @@ assembling slowly after a reboot), `/mnt/md0` is just an empty folder on the SSD
 `$LAKEHOUSE_DATA_DIR/...` does not exist. What happens then:
 
 - **The containers with a data volume fail to start**: Postgres, RustFS and both Spark workers.
-  `docker compose ps -a` shows them as `Exited` or `Created`, and their error says
+  `docker compose ps -a` shows them as not running, and `journalctl -u docker` shows
   `failed to mount local volume ... no such file or directory`. Dagster's webserver and daemon
   start but can't reach Postgres, so the UI shows errors and no runs launch. This is the safe
   outcome: nothing writes to the SSD by mistake.
-- **Docker does not retry them on its own.** `restart: unless-stopped` only restarts a container
-  that started and then died; a mount failure at boot leaves it down until someone acts.
+- **Docker does not retry them on its own.** At boot Docker tries each `unless-stopped`
+  container once. Its restart policy only reacts to a container that started and then exited,
+  so a mount failure leaves it down until someone acts.
 - **The dangerous case is creating the folders while the array is missing.** If someone runs the
   `mkdir -p` above (or any tool creates the folders) while `/mnt/md0` is unmounted, the folders
   land on the SSD, the services start, and Postgres comes up *empty* on the SSD. When the array is
@@ -113,8 +128,11 @@ To recover:
 1. `mountpoint /mnt/md0` and `cat /proc/mdstat`. If the array is degraded or failed, fix the
    array first; don't start the stack.
 2. Mount it (`sudo mount /mnt/md0`, or `sudo mount -a` if it is in `/etc/fstab`), then
-   `ls "$LAKEHOUSE_DATA_DIR"` should list `postgres`, `object-store` and the worker folders.
-3. `make up-uat` in `~/sec-lakehouse`. It recreates whatever failed. Then check
+   `ls /mnt/md0/sec-lakehouse` should list `postgres`, `object-store` and the worker folders.
+3. Start what failed with the image that is already deployed, without pulling a new one:
+   `docker compose -f docker-compose.yml -f docker-compose.uat.yml --env-file .env.uat start`.
+   (Or re-run the latest **Deploy UAT** run from the Actions tab.) The Dagster webserver and
+   daemon reconnect once Postgres is up; they don't need a restart. Then check
    `docker compose ps` and the Dagster UI as after a normal deploy.
 
 Optional hardening (needs `sudo` on the server, so only with Thanh's OK): make Docker wait for
@@ -127,5 +145,8 @@ sudo systemctl edit docker.service
 # RequiresMountsFor=/mnt/md0
 ```
 
-With that, if the array can't be mounted at all, Docker itself won't start, which also stops the
-other apps on the server that use Docker. Decide whether that trade-off is worth it before adding it.
+It takes effect at the next boot. It adds `Requires=` and `After=` on the mount, so a `nofail`
+option in `/etc/fstab` doesn't weaken it, and Docker waits for the array up to the mount's
+device timeout (90 s by default). The trade-off: if the array can't be mounted at all, Docker
+itself won't start, which also stops the other Docker apps on the server, such as `sparkpb`.
+Decide whether that is worth it before adding it.
