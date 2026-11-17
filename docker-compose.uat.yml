@@ -9,6 +9,15 @@ x-spark: &spark
 
 x-worker: &worker
   <<: *spark
+  environment:
+    # Repeated on purpose: a merge key replaces the whole map, so keep this in sync with x-spark.
+    SPARK_NO_DAEMONIZE: "true"
+    # Spark never prunes finished apps' work dirs (jars + logs) by itself; they had grown to
+    # 31 GB per worker inside the container layer on the SSD. Hourly sweep, keep 1 day.
+    SPARK_WORKER_OPTS: >-
+      -Dspark.worker.cleanup.enabled=true
+      -Dspark.worker.cleanup.interval=3600
+      -Dspark.worker.cleanup.appDataTtl=86400
   command:
     - spark-class
     - org.apache.spark.deploy.worker.Worker
