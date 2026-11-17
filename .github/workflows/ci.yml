@@ -33,11 +33,13 @@ jobs:
           changed=""
           # Tags, new branches (before = 000...) or a missing base count as code changes.
           if [ "$GITHUB_REF_TYPE" != tag ] && git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-            changed=$(git diff --name-only --no-renames "$BASE...$HEAD")
+            changed=$(git diff --name-only --no-renames "$BASE...$HEAD") || changed=""
           fi
           docs_only=false
-          # Same rule as the deploy's docs-only skip: only files under docs/ or ending in .md.
-          if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -qvE '^docs/|\.md$'; then
+          # Same rule as the deploy's docs-only skip (files under docs/ or ending in .md), except
+          # README.md, which the Dockerfile copies into the image.
+          if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -qvE '^docs/|\.md$' \
+             && ! printf '%s\n' "$changed" | grep -qx 'README.md'; then
             docs_only=true
           fi
           printf 'Changed files:\n%s\n' "${changed:-(unknown, treated as code)}"
@@ -70,10 +72,12 @@ jobs:
 
   # Runs the real Compose stack: pulls every third-party image, starts the services and
   # materializes hello_delta into the object store. Catches broken image tags and wiring.
-  # Skipped for docs-only changes: Markdown can't change the image or the Compose wiring.
+  # Skipped for docs-only PRs: Markdown can't change the image or the Compose wiring. It always
+  # runs on main, because the deploy compares against the last *deployed* commit, which can be
+  # older than this push's base (an earlier code merge whose CI failed or was cancelled).
   smoke:
     needs: check
-    if: needs.check.outputs.docs_only != 'true'
+    if: github.event_name == 'push' || needs.check.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -139,8 +143,9 @@ jobs:
         run: docker compose down -v
 
   # Publishes the image for UAT to pull. Pushes to main and tags only: on a PR it would just
-  # build the same image smoke already built and throw it away. It also runs for docs-only
-  # pushes, so every main commit has its sha- tag for a manual redeploy.
+  # build the same image smoke already built and throw it away. It runs for docs-only pushes
+  # too, so a manual redeploy of main finds its sha- tag. It doesn't wait for smoke; the deploy
+  # is protected because it waits for the whole CI run to succeed.
   image:
     needs: check
     if: github.event_name == 'push'

@@ -39,17 +39,24 @@ agents and 13 Deploy UAT. Two kinds of work in there did nothing:
   where it publishes the image UAT pulls.
 - **Docs-only PRs ran the whole Docker stack.** Three of the fifteen PRs (#3, #4, #18) only
   changed Markdown, yet each push started the Compose smoke test and the image build. Markdown
-  can't change the image, so `smoke` is now skipped when every changed file is under `docs/` or
-  ends in `.md`.
+  can't change the image, so on a PR `smoke` is now skipped when every changed file is under
+  `docs/` or ends in `.md`. The root `README.md` is the exception: the Dockerfile copies it into
+  the image, so touching it still runs `smoke`.
 
 What was kept on purpose:
 
-- **`check` always runs, docs-only or not.** It is required, and ruff also lints the Python code
-  blocks inside Markdown (PR #18 failed `check` on an ADR's code block), so docs can break it.
+- **`check` always runs, docs-only or not.** It is required, and ruff also checks the Python
+  code blocks inside Markdown (PR #18's first push failed `check` on code blocks in two ADRs), so
+  docs can break it.
+- **`smoke` always runs on `main`, docs-only or not.** The deploy compares the new commit with
+  the last commit it *deployed*, not with the previous commit on `main`. If a code merge's CI
+  failed or was cancelled, the next docs-only push to `main` would carry that untested code to
+  UAT. Running `smoke` on every `main` push closes that gap.
 - **CI on `main` after a merge.** It tests the merged result, which can differ from the PR branch,
   and it is the run that publishes the image the deploy needs.
-- **`image` on docs-only pushes to `main`.** A manual redeploy pins `sha-<commit>`, so every `main`
-  commit needs its image.
+- **`image` on docs-only pushes to `main`.** A manual redeploy pins `sha-<commit>` of the current
+  `main`, so that commit needs its image. (A `main` run cancelled by a quicker second merge never
+  publishes its tag, which is fine: only the newest commit is ever deployed.)
 - **PR agents re-running when the PR body is edited.** That is how a fixed description turns the
   check green. Skipping it on title-only edits looks tempting, but a skipped run would *replace*
   a failing `agents-run` with "skipped", which counts as a pass. So it stays as it is; it takes
@@ -64,8 +71,8 @@ flowchart TD
     event{Event} -- pull request update --> check
     event -- push to main or tag --> check
     check[check: lint, types, tests, Dagster validation<br/>+ detect a docs-only change] --> docs{docs_only?}
-    docs -- false --> smoke[smoke: build image, start Compose,<br/>materialize hello_delta]
-    docs -- true --> skipS[smoke skipped]
+    docs -- "false, or a push" --> smoke[smoke: build image, start Compose,<br/>materialize hello_delta]
+    docs -- "true, on a PR" --> skipS[smoke skipped]
     check --> push{push event?}
     push -- yes --> image[image: build and push to GHCR<br/>sha-, main, latest tags]
     push -- no, a PR --> skipI[image skipped]
@@ -90,7 +97,7 @@ sequenceDiagram
     Dev->>GH: push to PR branch
     par
         GH->>CI: pull_request
-        CI-->>GH: check (+ smoke unless docs-only)
+        CI-->>GH: check (+ smoke unless the PR is docs-only)
     and
         GH->>PA: pull_request
         PA-->>GH: agents-run
@@ -114,13 +121,15 @@ In `ci.yml`:
 2. **"Detect a docs-only change"** works out the base and head commits: the PR's base and head
    on a pull request, or `github.event.before` and the new commit on a push. It lists the changed
    files with `git diff --name-only --no-renames base...head` and sets `docs_only=true` only if
-   that list is non-empty and every file matches `^docs/|\.md$`. Anything it can't work out (a
-   tag, a brand-new branch whose `before` is all zeros, a missing base) counts as a code change,
-   so the Docker jobs run. The SHAs come in through `env:`, not pasted into the script.
+   that list is non-empty, every file matches `^docs/|\.md$` and `README.md` isn't one of them.
+   Anything it can't work out (a tag, a brand-new branch whose `before` is all zeros, a missing
+   base, a failed `git diff`) counts as a code change, so the Docker jobs run. The SHAs come in
+   through `env:`, not pasted into the script.
 3. The step writes `docs_only` to `$GITHUB_OUTPUT`, and the job exposes it as
    `outputs.docs_only` so later jobs can read it as `needs.check.outputs.docs_only`.
-4. **`smoke`** has `if: needs.check.outputs.docs_only != 'true'`. Comparing with `!= 'true'`
-   means that if the output were ever missing, `smoke` would still run.
+4. **`smoke`** has `if: github.event_name == 'push' || needs.check.outputs.docs_only != 'true'`,
+   so only a docs-only PR skips it. Comparing with `!= 'true'` means that if the output were ever
+   missing, `smoke` would still run.
 5. **`image`** has `if: github.event_name == 'push'` and now always pushes, so the GHCR login
    step no longer needs its own condition.
 
@@ -132,7 +141,12 @@ same docs-only rule, using its own `git diff` on the server.
 - **Required checks still report.** `check` runs on every PR. `smoke` and `image` are not
   required, so skipping them can't leave a PR stuck waiting.
 - **The deploy still has its image.** `image` runs on every push to `main`, docs-only included,
-  and Deploy UAT still waits for the whole CI run to succeed.
+  and Deploy UAT still waits for the whole CI run to succeed. `image` doesn't wait for `smoke`,
+  so a tag can be published from a run whose `smoke` then fails; the deploy won't use it,
+  because that run didn't succeed. This was already the case before.
+- **Build cache.** Only `image` on `main` writes the Docker layer cache now. A PR's `smoke` reads
+  `main`'s cache, so a PR that changes dependencies rebuilds those layers on each push. That
+  costs a few minutes on such PRs and keeps PR caches from crowding out `main`'s.
 - **Fail toward running more.** Every unclear case in the docs-only test runs the Docker jobs.
 - **No new third-party actions.** The path test is a few lines of shell instead of a
   path-filter action, so nothing new runs with access to the repo.
@@ -140,8 +154,9 @@ same docs-only rule, using its own `git diff` on the server.
 
 ## How it was tested
 
-- The docs-only step was run locally against real history: PR #18's commits give
-  `docs_only=true`, PR #19's give `false`, an all-zeros base gives `false` and a tag gives `false`.
+- The docs-only step was extracted from `ci.yml` and run locally against real history: PR #18's
+  commits give `docs_only=true`, PR #19's give `false`, an all-zeros base, a tag and a
+  `README.md`-only commit give `false`.
 - `actionlint` passes on `ci.yml` and `pr-agents.yml`.
 - The PR that made this change ran CI itself. A Markdown-only push to a PR is the way to see
   `smoke` skipped while `check` still runs.
