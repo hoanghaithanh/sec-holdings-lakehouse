@@ -1,21 +1,23 @@
-"""Silver filings and quarantine, end to end: Bronze from a zip, then the Silver asset (S1).
+"""Silver filings and quarantine, end to end (slice S1).
 
-Real samples come from tests/fixtures/form13f. Hand-made data sets (`filings_zip`) are marked as
-such in the fixtures README: they hold made-up filings with chosen values, to hit one rule each.
+Real samples from tests/fixtures/form13f go through the Bronze asset once per module, then
+Silver. Hand-made data sets (`bronze_rows`) are written straight to the three Bronze tables
+Silver reads, which keeps the tests fast; they hold made-up filings with chosen values, to hit
+one rule each, and are marked as such in the fixtures README.
 """
 
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 from dagster import AssetCheckSeverity, materialize
-from form13f_zips import build_zip, table_lines
 
 from sec_lakehouse.assets.form13f_bronze import bronze_form13f
 from sec_lakehouse.assets.form13f_raw import raw_zip_path
@@ -24,9 +26,11 @@ from sec_lakehouse.resources import LakehouseStorage, SparkResource
 from sec_lakehouse.sources.form13f import silver_schemas
 from sec_lakehouse.sources.form13f.datasets import DATASETS_BY_KEY
 from sec_lakehouse.sources.form13f.schemas import TABLES
+from sec_lakehouse.sources.form13f.silver_filing import FILING_SOURCES
 from sec_lakehouse.sources.form13f.silver_schemas import FILING_COLUMNS, RUN_COLUMNS
 
 FIXTURES = Path(__file__).parent / "fixtures" / "form13f"
+REAL_KEYS = ("2013q2", "2022q4", "2026-06_2026-08")
 SPECS = {spec.name: spec for spec in TABLES}
 BUSINESS = [name for name, _, _ in FILING_COLUMNS if name not in RUN_COLUMNS]
 
@@ -47,24 +51,26 @@ SUMMARYPAGE_DEFAULTS = {
     "tablevaluetotal": "1000",
     "isconfidentialomitted": "N",
 }
+DEFAULTS = {
+    "submission": SUBMISSION_DEFAULTS,
+    "coverpage": COVERPAGE_DEFAULTS,
+    "summarypage": SUMMARYPAGE_DEFAULTS,
+}
 
 
 def accession(i: int) -> str:
     return f"0000950123-13-{i:06d}"
 
 
-def _lines(table: str, rows: list[dict[str, str]]) -> list[str]:
-    columns = SPECS[table].columns
-    return ["\t".join(c.upper() for c in columns)] + [
-        "\t".join(row.get(c, "") for c in columns) for row in rows
-    ]
+def filing(i: int, **values: str) -> dict[str, str]:
+    return {"accession_number": accession(i), **values}
 
 
-def filings_zip(
+def bronze_rows(
     filings: list[dict[str, str]],
     drop: dict[str, set[str]] | None = None,
     extra: dict[str, list[dict[str, str]]] | None = None,
-) -> bytes:
+) -> dict[str, list[dict[str, str]]]:
     """A hand-made data set. Each filing dict names `accession_number` and overrides defaults.
 
     `drop` leaves an accession out of a table; `extra` adds rows (orphans) to a table.
@@ -72,26 +78,14 @@ def filings_zip(
     drop = drop or {}
     extra = extra or {}
     tables: dict[str, list[dict[str, str]]] = {}
-    for table, defaults in (
-        ("submission", SUBMISSION_DEFAULTS),
-        ("coverpage", COVERPAGE_DEFAULTS),
-        ("summarypage", SUMMARYPAGE_DEFAULTS),
-    ):
+    for table in FILING_SOURCES:
         columns = SPECS[table].columns
         tables[table] = [
-            {**defaults, **{k: v for k, v in f.items() if k in columns}}
+            {**DEFAULTS[table], **{k: v for k, v in f.items() if k in columns}}
             for f in filings
             if f["accession_number"] not in drop.get(table, set())
         ] + extra.get(table, [])
-    overrides = {name: _lines(name, rows) for name, rows in tables.items()}
-    # The other four tables only need rows for Bronze's DQ1; they are not read by S1.
-    for name in ("othermanager", "signature", "othermanager2", "infotable"):
-        overrides[name] = table_lines(SPECS[name], 1)
-    return build_zip(rows=1, overrides=overrides)
-
-
-def filing(i: int, **values: str) -> dict[str, str]:
-    return {"accession_number": accession(i), **values}
+    return tables
 
 
 @pytest.fixture
@@ -100,21 +94,41 @@ def storage(tmp_path: Path) -> LakehouseStorage:
 
 
 def land_bronze(
-    storage: LakehouseStorage, spark: SparkResource, tmp_path: Path, key: str, data: bytes
+    storage: LakehouseStorage,
+    spark: SparkResource,
+    key: str,
+    tables: dict[str, list[dict[str, str]]],
+    run_id: str | None = None,
 ) -> None:
-    """Put the zip in raw (replacing any earlier copy, as a manual re-land would) and load it."""
-    raw = Path(storage.uri(raw_zip_path(DATASETS_BY_KEY[key])))
-    raw.unlink(missing_ok=True)
-    source = tmp_path / f"{key}.zip"
-    source.write_bytes(data)
-    storage.put_new(raw_zip_path(DATASETS_BY_KEY[key]), source)
-    result = materialize(
-        [bronze_form13f],
-        partition_key=key,
-        resources={"spark": spark, "storage": storage},
-        raise_on_error=False,
-    )
-    assert result.success
+    """Write a data set to the three Bronze tables Silver reads, as one Bronze run would.
+
+    Same layout as `bronze_form13f`: every source column a string (`""` when empty), the five
+    metadata columns, partitioned by `_dataset` and replaced per data set. A new call for the
+    same key is a re-land.
+    """
+    from pyspark.sql import functions as F
+
+    session = spark.model_copy().get_session()
+    run_id = run_id or str(uuid.uuid4())
+    for table, rows in tables.items():
+        columns = SPECS[table].columns
+        data = [(*(row.get(c, "") for c in columns), i + 2) for i, row in enumerate(rows)]
+        schema = ", ".join(f"{c} string" for c in columns) + ", _source_line long"
+        df = session.createDataFrame(data, schema).select(
+            *columns,
+            F.lit(key).alias("_dataset"),
+            F.lit(f"test://{key}/{table.upper()}.tsv").alias("_source_file"),
+            "_source_line",
+            F.lit(datetime.now(UTC)).cast("timestamp").alias("_ingested_at"),
+            F.lit(run_id).alias("_run_id"),
+        )
+        (
+            df.write.format("delta")
+            .mode("overwrite")
+            .option("replaceWhere", f"_dataset = '{key}'")
+            .partitionBy("_dataset")
+            .save(storage.table_path("bronze", f"form13f_{table}"))
+        )
 
 
 def run_silver(storage: LakehouseStorage, spark: SparkResource, key: str, ok: bool = True) -> Any:
@@ -163,41 +177,48 @@ def lenient_quarantine() -> Iterator[None]:
 # --- real samples ------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("key", ["2013q2", "2022q4", "2026-06_2026-08"])
-def test_real_sample_becomes_typed_filings(
-    key: str, tmp_path: Path, storage: LakehouseStorage, spark_resource: SparkResource
-) -> None:
-    storage.put_new(raw_zip_path(DATASETS_BY_KEY[key]), FIXTURES / f"{key}_form13f_sample.zip")
-    assert materialize(
-        [bronze_form13f], partition_key=key, resources={"spark": spark_resource, "storage": storage}
-    ).success
-    result = run_silver(storage, spark_resource, key)
-
-    rows = filings(spark_resource, storage)
-    assert len(rows) == 10  # every real filing is clean: nothing quarantined
-    assert read(spark_resource, storage, "form13f_quarantine").count() == 0
-    df = read(spark_resource, storage, "form13f_filing")
-    assert [(f.name, f.dataType.simpleString()) for f in df.schema.fields] == [
-        (name, kind.replace("bigint", "bigint")) for name, kind, _ in FILING_COLUMNS
-    ]  # AC6: the declared schema, no string dates or amounts
-    for (table, name), evaluation in checks(result).items():
-        if evaluation.severity == AssetCheckSeverity.ERROR:
-            assert evaluation.passed, (table, name)
-    meta = materialized(result)["form13f_filing"]
-    assert meta["inserted"].value == 10 and meta["rows_for_dataset"].value == 10
-
-
-def test_real_restatement_and_notice_values(
-    tmp_path: Path, storage: LakehouseStorage, spark_resource: SparkResource
-) -> None:
-    for key in ("2013q2", "2022q4"):
+@pytest.fixture(scope="module")
+def real_lake(
+    tmp_path_factory: pytest.TempPathFactory, spark_resource: SparkResource
+) -> tuple[LakehouseStorage, dict[str, Any]]:
+    """The three real samples through Bronze and then Silver, in one lake, once per module."""
+    storage = LakehouseStorage(root_uri=str(tmp_path_factory.mktemp("real") / "lake"))
+    results = {}
+    for key in REAL_KEYS:
         storage.put_new(raw_zip_path(DATASETS_BY_KEY[key]), FIXTURES / f"{key}_form13f_sample.zip")
-        assert materialize(
+        bronze = materialize(
             [bronze_form13f],
             partition_key=key,
             resources={"spark": spark_resource, "storage": storage},
-        ).success
-        run_silver(storage, spark_resource, key)
+        )
+        assert bronze.success
+        results[key] = run_silver(storage, spark_resource, key)
+    return storage, results
+
+
+def test_real_samples_become_typed_filings(
+    real_lake: tuple[LakehouseStorage, dict[str, Any]], spark_resource: SparkResource
+) -> None:
+    storage, results = real_lake
+    rows = filings(spark_resource, storage)
+    assert len(rows) == 30  # every real filing is clean: nothing quarantined
+    assert read(spark_resource, storage, "form13f_quarantine").count() == 0
+    df = read(spark_resource, storage, "form13f_filing")
+    assert [(f.name, f.dataType.simpleString()) for f in df.schema.fields] == [
+        (name, kind) for name, kind, _ in FILING_COLUMNS
+    ]  # AC6: the declared schema, no string dates or amounts
+    for key, result in results.items():
+        for (table, name), evaluation in checks(result).items():
+            if evaluation.severity == AssetCheckSeverity.ERROR:
+                assert evaluation.passed, (key, table, name)
+        meta = materialized(result)["form13f_filing"]
+        assert meta["inserted"].value == 10 and meta["rows_for_dataset"].value == 10, key
+
+
+def test_real_restatement_and_notice_values(
+    real_lake: tuple[LakehouseStorage, dict[str, Any]], spark_resource: SparkResource
+) -> None:
+    storage, _ = real_lake
     rows = filings(spark_resource, storage)
 
     restatement = rows["0001085146-22-003667"]
@@ -224,19 +245,22 @@ def test_real_restatement_and_notice_values(
     assert original["cik"] == "0001566653"
     assert original["is_confidential_omitted"] is False
 
+    latest = next(r for r in rows.values() if r["_dataset"] == "2026-06_2026-08")
+    assert latest["value_unit"] == "DOLLARS"
+    assert latest["table_value_total_usd"] == latest["table_value_total_reported"]
+
 
 # --- hand-made data sets -----------------------------------------------------------------------
 
 
 def test_value_unit_follows_the_filing_date(
-    tmp_path: Path, storage: LakehouseStorage, spark_resource: SparkResource
+    storage: LakehouseStorage, spark_resource: SparkResource
 ) -> None:
     land_bronze(
         storage,
         spark_resource,
-        tmp_path,
         "2013q2",
-        filings_zip(
+        bronze_rows(
             [
                 filing(1, filing_date="30-DEC-2022", periodofreport="30-SEP-2022"),
                 filing(2, filing_date="03-JAN-2023", periodofreport="30-SEP-2022"),
@@ -252,15 +276,12 @@ def test_value_unit_follows_the_filing_date(
     assert rows[accession(2)]["table_value_total_usd"] == Decimal(1000)
 
 
-def test_cleaning_rules(
-    tmp_path: Path, storage: LakehouseStorage, spark_resource: SparkResource
-) -> None:
+def test_cleaning_rules(storage: LakehouseStorage, spark_resource: SparkResource) -> None:
     land_bronze(
         storage,
         spark_resource,
-        tmp_path,
         "2013q2",
-        filings_zip(
+        bronze_rows(
             [
                 filing(
                     1,
@@ -291,7 +312,7 @@ def test_cleaning_rules(
 
 @pytest.mark.usefixtures("lenient_quarantine")
 def test_each_reason_code_lands_in_quarantine_and_leaves_when_fixed(
-    tmp_path: Path, storage: LakehouseStorage, spark_resource: SparkResource
+    storage: LakehouseStorage, spark_resource: SparkResource
 ) -> None:
     bad = [
         filing(1),  # clean
@@ -307,9 +328,8 @@ def test_each_reason_code_lands_in_quarantine_and_leaves_when_fixed(
     land_bronze(
         storage,
         spark_resource,
-        tmp_path,
         "2013q2",
-        filings_zip(bad, drop={"coverpage": {accession(8)}}, extra={"coverpage": [orphan]}),
+        bronze_rows(bad, drop={"coverpage": {accession(8)}}, extra={"coverpage": [orphan]}),
     )
     result = run_silver(storage, spark_resource, "2013q2")
 
@@ -341,23 +361,20 @@ def test_each_reason_code_lands_in_quarantine_and_leaves_when_fixed(
     assert found[("form13f_quarantine", "quarantine_row_count")].metadata["rows"].value == 8
 
     # Re-land the data set with every row fixed: quarantine empties, all filings arrive.
-    land_bronze(
-        storage, spark_resource, tmp_path, "2013q2", filings_zip([filing(i) for i in range(1, 9)])
-    )
+    land_bronze(storage, spark_resource, "2013q2", bronze_rows([filing(i) for i in range(1, 9)]))
     run_silver(storage, spark_resource, "2013q2")
     assert set(filings(spark_resource, storage)) == {accession(i) for i in range(1, 9)}
     assert read(spark_resource, storage, "form13f_quarantine").count() == 0
 
 
 def test_quarantine_above_threshold_blocks_and_writes_nothing(
-    tmp_path: Path, storage: LakehouseStorage, spark_resource: SparkResource
+    storage: LakehouseStorage, spark_resource: SparkResource
 ) -> None:
     land_bronze(
         storage,
         spark_resource,
-        tmp_path,
         "2013q2",
-        filings_zip([filing(1), filing(2, submissiontype="13F-XX")]),
+        bronze_rows([filing(1), filing(2, submissiontype="13F-XX")]),
     )
     result = run_silver(storage, spark_resource, "2013q2", ok=False)
 
@@ -367,10 +384,8 @@ def test_quarantine_above_threshold_blocks_and_writes_nothing(
     assert not Path(storage.table_path("silver", "form13f_filing")).exists()
 
 
-def test_rerun_changes_nothing(
-    tmp_path: Path, storage: LakehouseStorage, spark_resource: SparkResource
-) -> None:
-    land_bronze(storage, spark_resource, tmp_path, "2013q2", filings_zip([filing(1), filing(2)]))
+def test_rerun_changes_nothing(storage: LakehouseStorage, spark_resource: SparkResource) -> None:
+    land_bronze(storage, spark_resource, "2013q2", bronze_rows([filing(1), filing(2)]))
     first = run_silver(storage, spark_resource, "2013q2").run_id
     second = run_silver(storage, spark_resource, "2013q2")
 
@@ -380,22 +395,20 @@ def test_rerun_changes_nothing(
 
 
 def test_relanded_data_set_updates_moves_and_deletes(
-    tmp_path: Path, storage: LakehouseStorage, spark_resource: SparkResource
+    storage: LakehouseStorage, spark_resource: SparkResource
 ) -> None:
     land_bronze(
         storage,
         spark_resource,
-        tmp_path,
         "2013q2",
-        filings_zip([filing(1), filing(2), filing(3)]),
+        bronze_rows([filing(1), filing(2), filing(3)]),
     )
     first = run_silver(storage, spark_resource, "2013q2").run_id
     land_bronze(
         storage,
         spark_resource,
-        tmp_path,
         "2013q2",
-        filings_zip(
+        bronze_rows(
             [
                 filing(1),
                 filing(2, periodofreport="31-DEC-2012", reportcalendarorquarter="31-DEC-2012"),
@@ -419,11 +432,11 @@ def test_shared_accession_goes_to_the_latest_data_set_in_any_order(
 ) -> None:
     storage = LakehouseStorage(root_uri=str(tmp_path / "lake"))
     data = {
-        "2013q2": filings_zip([filing(1), filing(2, filingmanager_name="Old Name")]),
-        "2013q3": filings_zip([filing(2, filingmanager_name="New Name"), filing(3)]),
+        "2013q2": bronze_rows([filing(1), filing(2, filingmanager_name="Old Name")]),
+        "2013q3": bronze_rows([filing(2, filingmanager_name="New Name"), filing(3)]),
     }
     for key in ("2013q2", "2013q3"):  # complete Bronze first (Q8)
-        land_bronze(storage, spark_resource, tmp_path, key, data[key])
+        land_bronze(storage, spark_resource, key, data[key])
     results = {key: run_silver(storage, spark_resource, key) for key in order}
 
     rows = filings(spark_resource, storage)
@@ -437,17 +450,16 @@ def test_shared_accession_goes_to_the_latest_data_set_in_any_order(
 
 
 def test_later_data_set_takes_over_an_accession_silver_already_has(
-    tmp_path: Path, storage: LakehouseStorage, spark_resource: SparkResource
+    storage: LakehouseStorage, spark_resource: SparkResource
 ) -> None:
     # Bronze grows after Silver ran: 2013q3 arrives later and holds a newer copy of filing 2.
-    land_bronze(storage, spark_resource, tmp_path, "2013q2", filings_zip([filing(1), filing(2)]))
+    land_bronze(storage, spark_resource, "2013q2", bronze_rows([filing(1), filing(2)]))
     run_silver(storage, spark_resource, "2013q2")
     land_bronze(
         storage,
         spark_resource,
-        tmp_path,
         "2013q3",
-        filings_zip([filing(2, filingmanager_name="New Name")]),
+        bronze_rows([filing(2, filingmanager_name="New Name")]),
     )
     result = run_silver(storage, spark_resource, "2013q3")
 
@@ -466,11 +478,11 @@ def test_later_data_set_takes_over_an_accession_silver_already_has(
 
 
 def test_half_loaded_bronze_is_refused(
-    tmp_path: Path, storage: LakehouseStorage, spark_resource: SparkResource
+    storage: LakehouseStorage, spark_resource: SparkResource
 ) -> None:
     run_silver(storage, spark_resource, "2013q2", ok=False)  # no Bronze at all
 
-    land_bronze(storage, spark_resource, tmp_path, "2013q2", filings_zip([filing(1)]))
+    land_bronze(storage, spark_resource, "2013q2", bronze_rows([filing(1)]))
     from delta.tables import DeltaTable
 
     session = spark_resource.model_copy().get_session()

@@ -20,7 +20,7 @@ The data is public SEC data. Used by `tests/test_form13f_real_samples.py`.
 
 ## Hand-made data sets (not real SEC data)
 
-The Silver tests also build small made-up data sets in code (`filings_zip` in
+The Silver tests also write small made-up data sets straight to Bronze (`bronze_rows` in
 `tests/test_form13f_silver_asset.py`). Their accession numbers (`0000950123-13-0000NN`), CIKs and
 manager names are invented, and each row is chosen to hit one Silver rule: a bad date, a period
 that is not a quarter end, an unknown submission type, an oversized integer, an orphan COVERPAGE
