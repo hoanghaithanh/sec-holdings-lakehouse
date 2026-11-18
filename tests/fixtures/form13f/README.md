@@ -17,3 +17,12 @@ Data lines per table:
 | 2026-06_2026-08 | 10 | 10 | 0 | 10 | 10 | 1 | 200 |
 
 The data is public SEC data. Used by `tests/test_form13f_real_samples.py`.
+
+## Hand-made data sets (not real SEC data)
+
+The Silver tests also write small made-up data sets straight to Bronze (`bronze_rows` in
+`tests/test_form13f_silver_asset.py`). Their accession numbers (`0000950123-13-0000NN`), CIKs and
+manager names are invented, and each row is chosen to hit one Silver rule: a bad date, a period
+that is not a quarter end, an unknown submission type, an oversized integer, an orphan COVERPAGE
+row, the value-unit boundary (2022-12-30 vs 2023-01-03), a re-land that changes a period, and one
+accession shared by two data sets.

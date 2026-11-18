@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dagster import Definitions, EnvVar, load_assets_from_modules
 
-from sec_lakehouse.assets import form13f_bronze, form13f_raw, hello
+from sec_lakehouse.assets import form13f_bronze, form13f_raw, form13f_silver, hello
 from sec_lakehouse.config import Settings
-from sec_lakehouse.jobs import form13f_bronze_job
+from sec_lakehouse.jobs import form13f_bronze_job, form13f_silver_job
 from sec_lakehouse.resources import LakehouseStorage, SecResource, SparkResource
 
 
@@ -38,7 +38,7 @@ def build_resources(settings: Settings) -> dict[str, object]:
 
 
 defs = Definitions(
-    assets=load_assets_from_modules([hello, form13f_raw, form13f_bronze]),
-    jobs=[form13f_bronze_job],
+    assets=load_assets_from_modules([hello, form13f_raw, form13f_bronze, form13f_silver]),
+    jobs=[form13f_bronze_job, form13f_silver_job],
     resources=build_resources(Settings.from_env()),
 )
