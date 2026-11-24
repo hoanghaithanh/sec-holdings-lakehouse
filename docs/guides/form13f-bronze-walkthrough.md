@@ -3,6 +3,7 @@
 A walkthrough of the `bronze_form13f` asset, written for someone new to Dagster, Spark and
 Delta Lake. It explains the code added in PR #14. Related decisions: [ADR-002](../adr/002-bronze-partitioning-and-idempotent-loads.md),
 [ADR-003](../adr/003-sec-http-client-and-raw-landing.md); data contract: [M1 spec](../specs/m1-bronze-ingestion.md).
+New to the 13F data itself? Start with [The 7 SEC 13F tables, explained from scratch](form13f-data-tables.md).
 
 ## The big picture
 
