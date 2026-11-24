@@ -28,6 +28,10 @@ DOLLARS_FROM = date(2023, 1, 3)
 # The first data set (2013q2) starts in May 2013; an earlier filing date fails SDQ4.
 EARLIEST_FILING_DATE = date(2013, 5, 1)
 
+# A CUSIP is 9 letters or digits (`N00985106`, a CINS, is valid). Other shapes are kept and
+# flagged in `cusip_format_ok`; check digits are M3 work.
+CUSIP_SHAPE = r"^[A-Z0-9]{9}$"
+
 # Quarantine reason codes, in the fixed order they appear in `reason_codes`.
 BAD_DATE = "BAD_DATE"
 BAD_PERIOD = "BAD_PERIOD"
@@ -54,6 +58,7 @@ class SilverTable:
 
 
 FILING = SilverTable("form13f_filing", ("accession_number",), "period_of_report")
+HOLDING = SilverTable("form13f_holding", ("accession_number", "infotable_sk"), "period_of_report")
 QUARANTINE = SilverTable(
     "form13f_quarantine", ("source_table", "_dataset", "_source_line"), "_dataset"
 )
@@ -100,6 +105,37 @@ FILING_COLUMNS: tuple[tuple[str, str, bool], ...] = (
     ("_silver_run_id", "string", False),
 )
 
+HOLDING_COLUMNS: tuple[tuple[str, str, bool], ...] = (
+    ("accession_number", "string", False),
+    ("infotable_sk", "bigint", False),
+    # Copied from the Silver filing row, so Gold needs no join for the common filters.
+    ("cik", "string", True),
+    ("filing_date", "date", False),
+    ("period_of_report", "date", False),
+    ("submission_type", "string", True),
+    ("amendment_type", "string", True),
+    ("issuer_name", "string", True),
+    ("title_of_class", "string", True),
+    ("cusip", "string", True),
+    ("cusip_format_ok", "boolean", False),
+    ("figi", "string", True),
+    ("value_reported", "decimal(20,0)", False),
+    ("value_unit", "string", False),
+    ("value_usd", "decimal(20,0)", False),
+    ("shares_or_principal", "decimal(20,0)", False),
+    ("shares_or_principal_type", "string", True),
+    ("put_call", "string", True),
+    ("investment_discretion", "string", True),
+    ("other_manager_refs_raw", "string", True),
+    ("voting_auth_sole", "decimal(20,0)", True),
+    ("voting_auth_shared", "decimal(20,0)", True),
+    ("voting_auth_none", "decimal(20,0)", True),
+    ("_dataset", "string", False),
+    ("_source_line", "bigint", False),
+    ("_silver_processed_at", "timestamp", False),
+    ("_silver_run_id", "string", False),
+)
+
 QUARANTINE_COLUMNS: tuple[tuple[str, str, bool], ...] = (
     ("source_table", "string", False),
     ("_dataset", "string", False),
@@ -137,6 +173,10 @@ def _struct(columns: tuple[tuple[str, str, bool], ...]) -> StructType:
 
 def filing_schema() -> StructType:
     return _struct(FILING_COLUMNS)
+
+
+def holding_schema() -> StructType:
+    return _struct(HOLDING_COLUMNS)
 
 
 def quarantine_schema() -> StructType:

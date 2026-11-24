@@ -1,7 +1,7 @@
-"""Silver filings and quarantine, end to end (slice S1).
+"""Silver filings, holdings and quarantine, end to end (slices S1 and S2).
 
 Real samples from tests/fixtures/form13f go through the Bronze asset once per module, then
-Silver. Hand-made data sets (`bronze_rows`) are written straight to the three Bronze tables
+Silver. Hand-made data sets (`bronze_rows`) are written straight to the four Bronze tables
 Silver reads, which keeps the tests fast; they hold made-up filings with chosen values, to hit
 one rule each, and are marked as such in the fixtures README.
 """
@@ -21,18 +21,22 @@ from dagster import AssetCheckSeverity, materialize
 
 from sec_lakehouse.assets.form13f_bronze import bronze_form13f
 from sec_lakehouse.assets.form13f_raw import raw_zip_path
-from sec_lakehouse.assets.form13f_silver import silver_form13f
+from sec_lakehouse.assets.form13f_silver import SILVER_SOURCES, silver_form13f
 from sec_lakehouse.resources import LakehouseStorage, SparkResource
 from sec_lakehouse.sources.form13f import silver_schemas
 from sec_lakehouse.sources.form13f.datasets import DATASETS_BY_KEY
 from sec_lakehouse.sources.form13f.schemas import TABLES
-from sec_lakehouse.sources.form13f.silver_filing import FILING_SOURCES
-from sec_lakehouse.sources.form13f.silver_schemas import FILING_COLUMNS, RUN_COLUMNS
+from sec_lakehouse.sources.form13f.silver_schemas import (
+    FILING_COLUMNS,
+    HOLDING_COLUMNS,
+    RUN_COLUMNS,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "form13f"
 REAL_KEYS = ("2013q2", "2022q4", "2026-06_2026-08")
 SPECS = {spec.name: spec for spec in TABLES}
 BUSINESS = [name for name, _, _ in FILING_COLUMNS if name not in RUN_COLUMNS]
+HOLDING_BUSINESS = [name for name, _, _ in HOLDING_COLUMNS if name not in RUN_COLUMNS]
 
 SUBMISSION_DEFAULTS = {
     "filing_date": "15-MAY-2013",
@@ -51,10 +55,23 @@ SUMMARYPAGE_DEFAULTS = {
     "tablevaluetotal": "1000",
     "isconfidentialomitted": "N",
 }
+INFOTABLE_DEFAULTS = {
+    "nameofissuer": "MADE UP CORP ",
+    "titleofclass": "COM",
+    "cusip": "123456789",
+    "value": "500",
+    "sshprnamt": "100",
+    "sshprnamttype": "SH",
+    "investmentdiscretion": "SOLE",
+    "voting_auth_sole": "100",
+    "voting_auth_shared": "0",
+    "voting_auth_none": "0",
+}
 DEFAULTS = {
     "submission": SUBMISSION_DEFAULTS,
     "coverpage": COVERPAGE_DEFAULTS,
     "summarypage": SUMMARYPAGE_DEFAULTS,
+    "infotable": INFOTABLE_DEFAULTS,
 }
 
 
@@ -66,25 +83,40 @@ def filing(i: int, **values: str) -> dict[str, str]:
     return {"accession_number": accession(i), **values}
 
 
+def line(sk: int, **values: str) -> dict[str, str]:
+    """A holding line override: its `infotable_sk` and any INFOTABLE values."""
+    return {"infotable_sk": str(sk), **values}
+
+
 def bronze_rows(
     filings: list[dict[str, str]],
     drop: dict[str, set[str]] | None = None,
     extra: dict[str, list[dict[str, str]]] | None = None,
+    lines: dict[str, list[dict[str, str]]] | None = None,
 ) -> dict[str, list[dict[str, str]]]:
     """A hand-made data set. Each filing dict names `accession_number` and overrides defaults.
 
-    `drop` leaves an accession out of a table; `extra` adds rows (orphans) to a table.
+    Every filing gets one default holding line (`infotable_sk` = 100 x its number + 1) unless
+    `lines` gives its lines by accession. `drop` leaves an accession out of a table; `extra`
+    adds rows (orphans) to a table.
     """
     drop = drop or {}
     extra = extra or {}
+    lines = lines or {}
     tables: dict[str, list[dict[str, str]]] = {}
-    for table in FILING_SOURCES:
+    for table in SILVER_SOURCES:
         columns = SPECS[table].columns
-        tables[table] = [
-            {**DEFAULTS[table], **{k: v for k, v in f.items() if k in columns}}
-            for f in filings
-            if f["accession_number"] not in drop.get(table, set())
-        ] + extra.get(table, [])
+        rows: list[dict[str, str]] = []
+        for f in filings:
+            acc = f["accession_number"]
+            if acc in drop.get(table, set()):
+                continue
+            if table == "infotable":
+                own = lines.get(acc, [line(int(acc[-6:]) * 100 + 1)])
+                rows += [{**DEFAULTS[table], **one, "accession_number": acc} for one in own]
+            else:
+                rows.append({**DEFAULTS[table], **{k: v for k, v in f.items() if k in columns}})
+        tables[table] = rows + extra.get(table, [])
     return tables
 
 
@@ -152,6 +184,21 @@ def filings(spark: SparkResource, storage: LakehouseStorage) -> dict[str, Any]:
     return {r["accession_number"]: r for r in read(spark, storage, "form13f_filing").collect()}
 
 
+def holdings(spark: SparkResource, storage: LakehouseStorage) -> dict[tuple[str, int], Any]:
+    return {
+        (r["accession_number"], r["infotable_sk"]): r
+        for r in read(spark, storage, "form13f_holding").collect()
+    }
+
+
+def quarantined(
+    spark: SparkResource, storage: LakehouseStorage, source_table: str
+) -> dict[str, Any]:
+    """Quarantine rows of one source table, by accession (each test keeps them unique)."""
+    rows = read(spark, storage, "form13f_quarantine").where(f"source_table = '{source_table}'")
+    return {r["accession_number"]: r for r in rows.collect()}
+
+
 def checks(result: Any) -> dict[tuple[str, str], Any]:
     return {(e.asset_key.path[-1], e.check_name): e for e in result.get_asset_check_evaluations()}
 
@@ -202,17 +249,25 @@ def test_real_samples_become_typed_filings(
     storage, results = real_lake
     rows = filings(spark_resource, storage)
     assert len(rows) == 30  # every real filing is clean: nothing quarantined
+    assert len(holdings(spark_resource, storage)) == 520  # every real holding line too
     assert read(spark_resource, storage, "form13f_quarantine").count() == 0
-    df = read(spark_resource, storage, "form13f_filing")
-    assert [(f.name, f.dataType.simpleString()) for f in df.schema.fields] == [
-        (name, kind) for name, kind, _ in FILING_COLUMNS
-    ]  # AC6: the declared schema, no string dates or amounts
+    for table, declared in (
+        ("form13f_filing", FILING_COLUMNS),
+        ("form13f_holding", HOLDING_COLUMNS),
+    ):
+        df = read(spark_resource, storage, table)
+        assert [(f.name, f.dataType.simpleString()) for f in df.schema.fields] == [
+            (name, kind) for name, kind, _ in declared
+        ]  # AC6: the declared schema, no string dates or amounts
     for key, result in results.items():
         for (table, name), evaluation in checks(result).items():
             if evaluation.severity == AssetCheckSeverity.ERROR:
                 assert evaluation.passed, (key, table, name)
         meta = materialized(result)["form13f_filing"]
         assert meta["inserted"].value == 10 and meta["rows_for_dataset"].value == 10, key
+        meta = materialized(result)["form13f_holding"]
+        lines = {"2013q2": 160, "2022q4": 160, "2026-06_2026-08": 200}[key]
+        assert meta["inserted"].value == lines and meta["rows_for_dataset"].value == lines, key
 
 
 def test_real_restatement_and_notice_values(
@@ -250,6 +305,46 @@ def test_real_restatement_and_notice_values(
     assert latest["table_value_total_usd"] == latest["table_value_total_reported"]
 
 
+def test_real_holdings_have_typed_values(
+    real_lake: tuple[LakehouseStorage, dict[str, Any]], spark_resource: SparkResource
+) -> None:
+    storage, results = real_lake
+    lines = holdings(spark_resource, storage)
+
+    amd = lines[("0001172661-22-002265", 72890028)]  # 2022q4: filed in thousands
+    assert amd["issuer_name"] == "ADVANCED MICRO DEVICES INC"
+    assert amd["cusip"] == "007903107" and amd["cusip_format_ok"] is True
+    assert (amd["value_reported"], amd["value_unit"]) == (Decimal(6336), "THOUSANDS")
+    assert amd["value_usd"] == Decimal(6_336_000)  # about $63 a share
+    assert amd["shares_or_principal"] == Decimal(100_000)
+    assert amd["shares_or_principal_type"] == "SH" and amd["put_call"] is None
+    assert amd["figi"] is None and amd["other_manager_refs_raw"] is None
+    assert amd["_dataset"] == "2022q4"
+
+    msft = lines[("0001580642-26-004768", 130830593)]  # 2026: filed in dollars
+    assert (msft["value_reported"], msft["value_unit"]) == (Decimal(5_304_131), "DOLLARS")
+    assert msft["value_usd"] == Decimal(5_304_131)  # about $373 a share
+    assert (msft["voting_auth_sole"], msft["voting_auth_none"]) == (Decimal(14210), Decimal(9))
+    assert msft["investment_discretion"] == "SOLE"
+
+    # Holding lines carry their filing's fields, so Gold filters need no join.
+    filing_rows = filings(spark_resource, storage)
+    for row in (amd, msft):
+        parent = filing_rows[row["accession_number"]]
+        for column in ("cik", "filing_date", "period_of_report", "submission_type"):
+            assert row[column] == parent[column], column
+    assert {r["put_call"] for r in lines.values()} == {None, "CALL", "PUT"}  # upper-cased
+    assert {r["shares_or_principal_type"] for r in lines.values()} == {"SH", "PRN"}
+    for key, result in results.items():
+        found = checks(result)
+        assert found[("form13f_holding", "sdq5_value_unit")].passed, key
+        sdq13 = found[("form13f_holding", "sdq13_cusip_format")]
+        # Real 2013 lines lost their leading zeros (`1282102  ` for 001282102): kept as filed
+        # and flagged, not padded; repairing CUSIPs is entity resolution (M3).
+        assert sdq13.metadata["cusip_format_not_ok"].value == (8 if key == "2013q2" else 0), key
+    assert lines[("0001566653-13-000012", 35631582)]["cusip"] == "1282102"
+
+
 # --- hand-made data sets -----------------------------------------------------------------------
 
 
@@ -274,6 +369,13 @@ def test_value_unit_follows_the_filing_date(
     assert rows[accession(1)]["table_value_total_usd"] == Decimal(1_000_000)
     assert rows[accession(2)]["value_unit"] == "DOLLARS"  # the boundary day is in dollars
     assert rows[accession(2)]["table_value_total_usd"] == Decimal(1000)
+    # Holding lines take the unit of their filing: value 500 is $500,000 before, $500 after.
+    lines = holdings(spark_resource, storage)
+    assert lines[(accession(1), 101)]["value_unit"] == "THOUSANDS"
+    assert lines[(accession(1), 101)]["value_usd"] == Decimal(500_000)
+    assert lines[(accession(2), 201)]["value_unit"] == "DOLLARS"
+    assert lines[(accession(2), 201)]["value_usd"] == Decimal(500)
+    assert lines[(accession(2), 201)]["value_reported"] == Decimal(500)  # as filed, kept
 
 
 def test_cleaning_rules(storage: LakehouseStorage, spark_resource: SparkResource) -> None:
@@ -335,8 +437,8 @@ def test_each_reason_code_lands_in_quarantine_and_leaves_when_fixed(
 
     assert set(filings(spark_resource, storage)) == {accession(1)}
     quarantine = {
-        r["accession_number"]: r
-        for r in read(spark_resource, storage, "form13f_quarantine").collect()
+        **quarantined(spark_resource, storage, "submission"),
+        **quarantined(spark_resource, storage, "coverpage"),
     }
     codes = {a: (r["source_table"], r["reason_codes"]) for a, r in quarantine.items()}
     assert codes == {
@@ -354,16 +456,24 @@ def test_each_reason_code_lands_in_quarantine_and_leaves_when_fixed(
     assert raw["coverpage"]["reportcalendarorquarter"] == "31-MAR-2013"
     assert "filing_date=2013-05-15" in quarantine[accession(2)]["reason_detail"]
     assert quarantine[accession(8)]["reason_detail"] == "no COVERPAGE row for this filing"
+    # A quarantined filing takes its holding lines with it, so no line is left without a unit.
+    cascaded = quarantined(spark_resource, storage, "infotable")
+    assert {a: r["reason_codes"] for a, r in cascaded.items()} == {
+        accession(i): ["NO_FILING"] for i in range(2, 9)
+    }
+    assert set(holdings(spark_resource, storage)) == {(accession(1), 101)}
     found = checks(result)
     assert found[("form13f_filing", "sdq3_rows_conserved")].passed  # 8 = 1 + 7 + 0
+    assert found[("form13f_holding", "sdq3_rows_conserved")].passed  # 8 = 1 + 7 + 0
     sdq6 = found[("form13f_filing", "sdq6_quarantine_rate")]
     assert not sdq6.passed and sdq6.severity == AssetCheckSeverity.WARN
-    assert found[("form13f_quarantine", "quarantine_row_count")].metadata["rows"].value == 8
+    assert found[("form13f_quarantine", "quarantine_row_count")].metadata["rows"].value == 15
 
     # Re-land the data set with every row fixed: quarantine empties, all filings arrive.
     land_bronze(storage, spark_resource, "2013q2", bronze_rows([filing(i) for i in range(1, 9)]))
     run_silver(storage, spark_resource, "2013q2")
     assert set(filings(spark_resource, storage)) == {accession(i) for i in range(1, 9)}
+    assert len(holdings(spark_resource, storage)) == 8
     assert read(spark_resource, storage, "form13f_quarantine").count() == 0
 
 
@@ -382,6 +492,7 @@ def test_quarantine_above_threshold_blocks_and_writes_nothing(
     assert not sdq6.passed and sdq6.severity == AssetCheckSeverity.ERROR
     assert sdq6.metadata["quarantine_ratio"].value == 0.5
     assert not Path(storage.table_path("silver", "form13f_filing")).exists()
+    assert not Path(storage.table_path("silver", "form13f_holding")).exists()
 
 
 def test_rerun_changes_nothing(storage: LakehouseStorage, spark_resource: SparkResource) -> None:
@@ -389,9 +500,11 @@ def test_rerun_changes_nothing(storage: LakehouseStorage, spark_resource: SparkR
     first = run_silver(storage, spark_resource, "2013q2").run_id
     second = run_silver(storage, spark_resource, "2013q2")
 
-    meta = materialized(second)["form13f_filing"]
-    assert (meta["inserted"].value, meta["updated"].value, meta["deleted"].value) == (0, 0, 0)
+    for table in ("form13f_filing", "form13f_holding"):
+        meta = materialized(second)[table]
+        assert (meta["inserted"].value, meta["updated"].value, meta["deleted"].value) == (0, 0, 0)
     assert {r["_silver_run_id"] for r in filings(spark_resource, storage).values()} == {first}
+    assert {r["_silver_run_id"] for r in holdings(spark_resource, storage).values()} == {first}
 
 
 def test_relanded_data_set_updates_moves_and_deletes(
@@ -424,6 +537,12 @@ def test_relanded_data_set_updates_moves_and_deletes(
     meta = materialized(result)["form13f_filing"]
     assert (meta["inserted"].value, meta["updated"].value, meta["deleted"].value) == (0, 1, 1)
     assert meta["handed_back_to"].value == "none (gone from Bronze)"
+    lines = holdings(spark_resource, storage)
+    assert set(lines) == {(accession(1), 101), (accession(2), 201)}  # 3's line left with it
+    assert lines[(accession(2), 201)]["period_of_report"] == date(2012, 12, 31)  # moved too
+    assert lines[(accession(1), 101)]["_silver_run_id"] == first
+    meta = materialized(result)["form13f_holding"]
+    assert (meta["inserted"].value, meta["updated"].value, meta["deleted"].value) == (0, 1, 1)
 
 
 @pytest.mark.parametrize("order", [("2013q2", "2013q3"), ("2013q3", "2013q2")])
@@ -433,7 +552,10 @@ def test_shared_accession_goes_to_the_latest_data_set_in_any_order(
     storage = LakehouseStorage(root_uri=str(tmp_path / "lake"))
     data = {
         "2013q2": bronze_rows([filing(1), filing(2, filingmanager_name="Old Name")]),
-        "2013q3": bronze_rows([filing(2, filingmanager_name="New Name"), filing(3)]),
+        "2013q3": bronze_rows(
+            [filing(2, filingmanager_name="New Name"), filing(3)],
+            lines={accession(2): [line(201, value="999")]},
+        ),
     }
     for key in ("2013q2", "2013q3"):  # complete Bronze first (Q8)
         land_bronze(storage, spark_resource, key, data[key])
@@ -447,6 +569,23 @@ def test_shared_accession_goes_to_the_latest_data_set_in_any_order(
     assert rows[accession(1)]["_silver_run_id"] == results["2013q2"].run_id
     q2 = checks(results["2013q2"])[("form13f_filing", "sdq3_rows_conserved")]
     assert q2.passed and q2.metadata["superseded"].value == 1
+    lines = holdings(spark_resource, storage)
+    assert sorted(lines) == [(accession(1), 101), (accession(2), 201), (accession(3), 301)]
+    assert lines[(accession(2), 201)]["_dataset"] == "2013q3"
+    assert lines[(accession(2), 201)]["value_reported"] == Decimal(999)  # 2013q3's copy
+    q2 = checks(results["2013q2"])[("form13f_holding", "sdq3_rows_conserved")]
+    assert q2.passed and q2.metadata["superseded"].value == 1
+    # Both copies of filing 2 differ (name, value): SDQ11 counts them, in either data set.
+    for result in results.values():
+        found = checks(result)
+        sdq11 = found[("form13f_filing", "sdq11_differing_duplicates")]
+        assert (sdq11.metadata["shared_keys"].value, sdq11.metadata["differing_keys"].value) == (
+            1,
+            1,
+        )
+        sdq11 = found[("form13f_holding", "sdq11_differing_duplicates")]
+        assert not sdq11.passed and sdq11.severity == AssetCheckSeverity.WARN
+        assert sdq11.metadata["differing_keys"].value == 1
 
 
 def test_later_data_set_takes_over_an_accession_silver_already_has(
@@ -469,6 +608,11 @@ def test_later_data_set_takes_over_an_accession_silver_already_has(
     meta = materialized(result)["form13f_filing"]
     assert (meta["inserted"].value, meta["updated"].value) == (0, 1)
     assert meta["taken_over_from"].value == "2013q2"
+    taken = holdings(spark_resource, storage)[(accession(2), 201)]
+    assert taken["_dataset"] == "2013q3"  # the line moved with its filing
+    meta = materialized(result)["form13f_holding"]
+    assert (meta["inserted"].value, meta["updated"].value) == (0, 1)
+    assert meta["datasets_read"].value == "2013q2, 2013q3"
 
     # Rerunning the earlier data set now leaves the taken-over row alone.
     rerun = run_silver(storage, spark_resource, "2013q2")
@@ -492,3 +636,158 @@ def test_half_loaded_bronze_is_refused(
     result = run_silver(storage, spark_resource, "2013q2", ok=False)
     failure = next(e for e in result.all_events if e.event_type_value == "STEP_FAILURE")
     assert "half loaded" in str(failure.event_specific_data.error)
+
+
+@pytest.mark.usefixtures("lenient_quarantine")
+def test_holding_rules_cleaning_and_reason_codes(
+    storage: LakehouseStorage, spark_resource: SparkResource
+) -> None:
+    orphan = {**INFOTABLE_DEFAULTS, "accession_number": accession(99), "infotable_sk": "9901"}
+    land_bronze(
+        storage,
+        spark_resource,
+        "2013q2",
+        bronze_rows(
+            [filing(1), filing(2), filing(3), filing(4), filing(5)],
+            lines={
+                accession(1): [
+                    line(
+                        101,
+                        cusip=" n00985106 ",  # a CINS: letter first, valid shape
+                        putcall="Call",
+                        othermanager=" 1,2 ",
+                        voting_auth_shared="",  # optional: null, not quarantined
+                    ),
+                    line(102, cusip="12345", othermanager="None"),  # kept, flagged
+                ],
+                accession(2): [line(201, value="")],  # BAD_INTEGER: required amount missing
+                accession(3): [line(301, sshprnamt="12345678901234567")],  # BAD_INTEGER: 17
+                accession(4): [{"infotable_sk": "4x01"}],  # BAD_INTEGER: the key itself
+                accession(5): [line(501, voting_auth_none="-1", value="1.5")],  # two columns
+            },
+            extra={"infotable": [orphan]},  # NO_FILING: no SUBMISSION row anywhere
+        ),
+    )
+    result = run_silver(storage, spark_resource, "2013q2")
+
+    lines = holdings(spark_resource, storage)
+    assert set(lines) == {(accession(1), 101), (accession(1), 102)}
+    cins, short = lines[(accession(1), 101)], lines[(accession(1), 102)]
+    assert (cins["cusip"], cins["cusip_format_ok"]) == ("N00985106", True)
+    assert (short["cusip"], short["cusip_format_ok"]) == ("12345", False)
+    assert cins["put_call"] == "CALL" and cins["voting_auth_shared"] is None
+    assert cins["other_manager_refs_raw"] == "1,2"  # trimmed, not parsed
+    assert short["other_manager_refs_raw"] == "None"  # the literal stays
+    assert cins["issuer_name"] == "MADE UP CORP"  # trailing space trimmed
+
+    quarantine = quarantined(spark_resource, storage, "infotable")
+    assert {a: r["reason_codes"] for a, r in quarantine.items()} == {
+        accession(2): ["BAD_INTEGER"],
+        accession(3): ["BAD_INTEGER"],
+        accession(4): ["BAD_INTEGER"],
+        accession(5): ["BAD_INTEGER"],
+        accession(99): ["NO_FILING"],
+    }
+    assert quarantine[accession(2)]["reason_detail"] == "value="
+    assert quarantine[accession(5)]["reason_detail"] == "value=1.5; voting_auth_none=-1"
+    raw = json.loads(quarantine[accession(4)]["raw_row"])
+    assert raw["infotable"]["infotable_sk"] == "4x01"  # the original string, replayable
+    assert set(filings(spark_resource, storage)) == {accession(i) for i in range(1, 6)}
+
+    found = checks(result)
+    sdq13 = found[("form13f_holding", "sdq13_cusip_format")]
+    assert not sdq13.passed and sdq13.severity == AssetCheckSeverity.WARN
+    assert sdq13.metadata["cusip_format_not_ok"].value == 1
+    sdq3 = found[("form13f_holding", "sdq3_rows_conserved")]
+    assert sdq3.passed and sdq3.metadata["bronze_rows"].value == 7  # 7 = 2 + 5 + 0
+    sdq6 = found[("form13f_holding", "sdq6_quarantine_rate")]
+    assert not sdq6.passed and sdq6.severity == AssetCheckSeverity.WARN
+    assert sdq6.metadata["quarantined_holdings"].value == 5
+    reasons = materialized(result)["form13f_quarantine"]["reasons"].value
+    assert reasons == {"infotable:BAD_INTEGER": 4, "infotable:NO_FILING": 1}
+
+
+def test_holding_quarantine_above_threshold_blocks_and_writes_nothing(
+    storage: LakehouseStorage, spark_resource: SparkResource
+) -> None:
+    land_bronze(
+        storage,
+        spark_resource,
+        "2013q2",
+        bronze_rows([filing(1)], lines={accession(1): [line(101), line(102, value="x")]}),
+    )
+    result = run_silver(storage, spark_resource, "2013q2", ok=False)
+
+    found = checks(result)
+    assert found[("form13f_filing", "sdq6_quarantine_rate")].passed  # the filing is clean
+    sdq6 = found[("form13f_holding", "sdq6_quarantine_rate")]
+    assert not sdq6.passed and sdq6.severity == AssetCheckSeverity.ERROR
+    assert not Path(storage.table_path("silver", "form13f_holding")).exists()
+
+
+def test_changed_holding_line_is_the_only_one_rewritten(
+    storage: LakehouseStorage, spark_resource: SparkResource
+) -> None:
+    three = [line(101), line(102), line(103)]
+    land_bronze(
+        storage, spark_resource, "2013q2", bronze_rows([filing(1)], lines={accession(1): three})
+    )
+    first = run_silver(storage, spark_resource, "2013q2").run_id
+    land_bronze(
+        storage,
+        spark_resource,
+        "2013q2",
+        bronze_rows(
+            [filing(1)],
+            lines={accession(1): [line(101), line(102, value="700"), line(104)]},
+        ),
+    )
+    second = run_silver(storage, spark_resource, "2013q2")
+
+    lines = holdings(spark_resource, storage)
+    assert sorted(sk for _, sk in lines) == [101, 102, 104]  # 103 left Bronze, so left Silver
+    assert lines[(accession(1), 101)]["_silver_run_id"] == first
+    assert lines[(accession(1), 102)]["_silver_run_id"] == second.run_id
+    assert lines[(accession(1), 102)]["value_usd"] == Decimal(700_000)
+    meta = materialized(second)["form13f_holding"]
+    assert (meta["inserted"].value, meta["updated"].value, meta["deleted"].value) == (1, 1, 1)
+    assert materialized(second)["form13f_filing"]["updated"].value == 0  # filing unchanged
+
+
+def test_identical_copies_in_two_data_sets_are_not_counted_as_differing(
+    storage: LakehouseStorage, spark_resource: SparkResource
+) -> None:
+    for key in ("2013q2", "2013q3"):
+        land_bronze(storage, spark_resource, key, bronze_rows([filing(1)]))
+    result = run_silver(storage, spark_resource, "2013q3")
+
+    for table in ("form13f_filing", "form13f_holding"):
+        sdq11 = checks(result)[(table, "sdq11_differing_duplicates")]
+        assert sdq11.passed, table
+        assert (sdq11.metadata["shared_keys"].value, sdq11.metadata["differing_keys"].value) == (
+            1,
+            0,
+        )
+
+
+def test_every_silver_table_declares_its_checks() -> None:
+    """AC16: row count, key and the SDQ rules, with the spec's blocking flags."""
+    specs = {
+        (spec.asset_key.path[-1], spec.name): spec.blocking for spec in silver_form13f.check_specs
+    }
+    for table in ("form13f_filing", "form13f_holding"):
+        for name in (
+            "sdq1_has_rows",
+            "sdq2_key_unique",
+            "sdq3_rows_conserved",
+            "sdq5_value_unit",
+            "sdq6_quarantine_rate",
+            "sdq7_referential",
+        ):
+            assert specs[(table, name)] is True, (table, name)
+        assert specs[(table, "sdq11_differing_duplicates")] is False
+    assert specs[("form13f_filing", "sdq4_dates_and_types")] is True
+    assert specs[("form13f_filing", "sdq10_unrecognised_values")] is False
+    assert specs[("form13f_holding", "sdq13_cusip_format")] is False
+    assert specs[("form13f_quarantine", "sdq2_key_unique")] is True
+    assert specs[("form13f_quarantine", "quarantine_row_count")] is False

@@ -5,19 +5,22 @@ do after a Bronze re-land or a blocked run. Background: [M2 spec](../specs/m2-si
 [ADR-005](../adr/005-silver-keys-layout-and-write-strategy.md),
 [walkthrough](../guides/form13f-silver-filing-walkthrough.md).
 
-As of slice S1, one job, `form13f_silver_job`, refreshes two tables for one data set (one
+As of slice S2, one job, `form13f_silver_job`, refreshes three tables for one data set (one
 partition, the same keys as Bronze):
 
 - `silver/form13f_filing`: one typed row per filing, Delta-partitioned by `period_of_report`;
+- `silver/form13f_holding`: one typed row per holding line, with `value_usd` in dollars,
+  Delta-partitioned by `period_of_report`;
 - `silver/form13f_quarantine`: the Bronze rows that failed a rule, partitioned by `_dataset`.
 
-Holdings (S2) and the effective table (S3) join the same job later. A Silver run reads Bronze only:
+The effective table (S3) joins the same job later. A Silver run reads Bronze only:
 it makes no SEC request and works with `SEC_USER_AGENT` unset.
 
 ## Before the first run
 
 - The Bronze data set is loaded and its run was green (`form13f_bronze_job`,
-  [Bronze runbook](form13f-bronze.md)). A Silver run refuses a data set whose Bronze tables come
+  [Bronze runbook](form13f-bronze.md)). Silver reads SUBMISSION, COVERPAGE, SUMMARYPAGE and
+  INFOTABLE. A Silver run refuses a data set whose Bronze tables come
   from different Bronze runs ("half loaded").
 - No Bronze backfill is running. Bronze and Silver share the pool `delta_writes` (limit 1), so
   they would only queue behind each other, but a Silver run during a Bronze backfill can read a
@@ -38,9 +41,9 @@ dc exec dagster-daemon dagster job backfill -w /opt/dagster/home/workspace.yaml 
   -j form13f_silver_job --partitions 2022q4 --noprompt
 ```
 
-Check: the run is green, and `silver/form13f_filing` shows `inserted`, `updated`, `deleted`,
-`quarantined` and `superseded` in its metadata. A rerun with nothing changed in Bronze shows
-`0, 0, 0` and writes no new filing version.
+Check: the run is green, and `silver/form13f_filing` and `silver/form13f_holding` each show
+`inserted`, `updated`, `deleted`, `quarantined` and `superseded` in their metadata. A rerun with
+nothing changed in Bronze shows `0, 0, 0` for both and writes no new filing or holding version.
 
 ## Full backfill
 
@@ -75,10 +78,12 @@ by a later data set. Read SDQ3's metadata (`quarantined`, `superseded`): if ever
 superseded, the data set was fully republished in a later zip and the failure is expected; note
 it in the acceptance report. Otherwise treat it like an SDQ6 block below.
 
-## A run blocked by SDQ6 (too many quarantined filings)
+## A run blocked by SDQ6 (too many quarantined filings or holding lines)
 
-SDQ6 blocks a data set when more than 1% of its filings would be quarantined, and nothing is
-written. The error lists the top reason codes.
+SDQ6 blocks a data set when more than 1% of its filings, or of its holding lines, would be
+quarantined, and nothing is written. The error lists the top reason codes. A quarantined filing
+takes all its lines with it (`NO_FILING`), so if `NO_FILING` leads the list, start from the
+filings: one bad filing with thousands of lines is enough.
 
 1. Look at the reason codes and `reason_detail` in the failed run's SDQ6 metadata and logs.
 2. If the rule is wrong, fix it in a PR. If the data really is bad and should load anyway, add
@@ -93,3 +98,15 @@ quarantine = spark.read.format("delta").load("<LAKEHOUSE_ROOT>/silver/form13f_qu
 rows = quarantine.where("_dataset = '2022q4'")
 rows.select("source_table", "reason_codes", "reason_detail").show(20, truncate=False)
 ```
+
+The quarantine's `reasons` metadata counts rows per table and code (`infotable:BAD_INTEGER`,
+`submission:BAD_DATE`). Holding lines have `source_table = 'infotable'` and their raw line in
+`raw_row`.
+
+## Warn counts worth a look
+
+- SDQ11 (`differing_keys`): accessions or holding lines that another data set also holds with
+  different content. The latest data set wins either way; a high count is worth a note in the
+  acceptance report.
+- SDQ13 (`cusip_format_not_ok`): holding lines whose CUSIP is not 9 letters or digits, kept as
+  filed. Real 2013 data has CUSIPs that lost their leading zeros (`1282102` for `001282102`).
