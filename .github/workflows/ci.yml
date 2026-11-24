@@ -13,7 +13,9 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The Spark-backed Silver tests took the suite past 20 min (M2 slice S2). 45 is a ceiling,
+    # not a target: if the suite nears it, make the tests faster instead of raising it again.
+    timeout-minutes: 45
     outputs:
       docs_only: ${{ steps.changes.outputs.docs_only }}
     steps:
