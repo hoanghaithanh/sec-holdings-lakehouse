@@ -612,7 +612,6 @@ def test_later_data_set_takes_over_an_accession_silver_already_has(
     assert taken["_dataset"] == "2013q3"  # the line moved with its filing
     meta = materialized(result)["form13f_holding"]
     assert (meta["inserted"].value, meta["updated"].value) == (0, 1)
-    assert meta["datasets_read"].value == "2013q2, 2013q3"
 
     # Rerunning the earlier data set now leaves the taken-over row alone.
     rerun = run_silver(storage, spark_resource, "2013q2")
@@ -791,3 +790,36 @@ def test_every_silver_table_declares_its_checks() -> None:
     assert specs[("form13f_holding", "sdq13_cusip_format")] is False
     assert specs[("form13f_quarantine", "sdq2_key_unique")] is True
     assert specs[("form13f_quarantine", "quarantine_row_count")] is False
+
+
+def test_lines_left_by_a_crash_between_the_two_merges_are_repaired_later(
+    storage: LakehouseStorage, spark_resource: SparkResource
+) -> None:
+    """A run that died after the holding MERGE and before the filing MERGE (ADR-005).
+
+    Simulated by hand: 2013q3's lines of filing 1 were written (including one line only it
+    has), but the filing row still says 2013q2. Then 2013q4 takes filing 1 over. Its run must
+    find and replace every line of filing 1, whatever `_dataset` they carry.
+    """
+    from delta.tables import DeltaTable
+    from pyspark.sql import functions as F
+
+    land_bronze(storage, spark_resource, "2013q2", bronze_rows([filing(1)]))
+    run_silver(storage, spark_resource, "2013q2")
+    session = spark_resource.model_copy().get_session()
+    path = storage.table_path("silver", "form13f_holding")
+    DeltaTable.forPath(session, path).update(set={"_dataset": "'2013q3'"})
+    stray = read(spark_resource, storage, "form13f_holding").withColumn(
+        "infotable_sk", F.lit(102).cast("bigint")
+    )
+    stray.write.format("delta").mode("append").save(path)
+    assert len(holdings(spark_resource, storage)) == 2
+
+    land_bronze(storage, spark_resource, "2013q4", bronze_rows([filing(1)]))
+    result = run_silver(storage, spark_resource, "2013q4")
+
+    lines = holdings(spark_resource, storage)
+    assert set(lines) == {(accession(1), 101)}  # the stray line of the dead run is gone
+    assert lines[(accession(1), 101)]["_dataset"] == "2013q4"
+    assert filings(spark_resource, storage)[accession(1)]["_dataset"] == "2013q4"
+    assert checks(result)[("form13f_holding", "sdq7_referential")].passed

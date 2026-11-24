@@ -98,9 +98,6 @@ generic, and the holding table is its second user.
   big side never has to be shuffled across the network. A data set has tens of thousands of
   filings at most, so the filings side is broadcast to the millions of holding lines.
 - **Cascade.** A filing that fails a rule takes all its holding lines into quarantine with it.
-- **Data skipping.** Delta keeps the min and max of each column for every data file. A filter like
-  `_dataset IN ('2024q1')` lets Delta skip files whose `_dataset` range can't match, without
-  opening them. Different from partition pruning, which skips whole folders.
 
 ## One run, the holding part
 
@@ -119,7 +116,7 @@ flowchart TD
     good --> pre{"SDQ5 unit and value_usd right?<br/>SDQ6 quarantined at most 1%?"}
     quar --> pre
     pre -- no --> fail1[SilverQualityError<br/>nothing written]
-    pre -- yes --> old["Old rows: Silver holdings in the quarters P_X,<br/>with _dataset in the scope's data sets,<br/>and accession in scope S_X"]
+    pre -- yes --> old["Old rows: Silver holdings in the quarters P_X<br/>with accession in scope S_X"]
     old --> cs[Change set: good rows vs old rows]
     cs --> mh[MERGE holdings]
     mh --> mf[MERGE filings]
@@ -148,7 +145,7 @@ sequenceDiagram
         A-->>D: check results, then SilverQualityError
     else
         A->>F: read rows of accessions in scope, collect quarters P_X
-        A->>H: read rows in P_X, data sets in scope, accessions in scope
+        A->>H: read rows in P_X with accessions in scope
         A->>S: two change sets, count inserts / updates / deletes
         A->>H: MERGE holding change set (literal list of quarters)
         A->>F: MERGE filing change set
@@ -220,7 +217,9 @@ Padding them back looks easy but would guess; fixing ids is entity resolution (M
 ### 3. Split three ways (`split_holdings`)
 
 Same pattern as filings. A line whose accession a later data set owns is **superseded** (counted,
-never written). The rest is either clean (`good`) or has reason codes (`quarantine`, with
+never written). Ownership is decided per accession, from SUBMISSION only (ADR-005): if the later
+copy of a filing has no lines, or gets quarantined there, the earlier lines are still not used.
+The filing and its lines always come from the same copy. The rest is either clean (`good`) or has reason codes (`quarantine`, with
 `source_table = 'infotable'` and the raw line as JSON). So for every data set:
 `Bronze INFOTABLE rows = Silver holding rows + quarantined lines + superseded lines` (SDQ3).
 
@@ -235,29 +234,30 @@ never written). The rest is either clean (`good`) or has reason codes (`quaranti
   single bad filing with 5,000 lines can block a small data set; the error message lists the top
   reason codes, so `NO_FILING` at the top points at the filing side.
 
-### 5. Reading as little of the holding table as possible
+### 5. Reading the old holding rows
 
 To build the change set, the run needs the holdings Silver already has for the accessions it is
-responsible for (`S_X`, from S1). Three filters, from cheapest to most precise:
+responsible for (`S_X`, from S1). Two filters:
 
 ```python
 silver_holdings.where(
     F.col("period_of_report").isin(*periods)  # 1. partition pruning: only quarters P_X
-    & F.col("_dataset").isin(*datasets_in_scope)  # 2. data skipping on file statistics
-).join(scope, "accession_number", "left_semi")  # 3. exactly the accessions in S_X
+).join(scope, "accession_number", "left_semi")  # 2. exactly the accessions in S_X
 ```
 
-1. `P_X` comes from the filing table, which is small. It is enough because every holding row
-   has a filing row with the same accession and quarter (SDQ7 checks it after every run).
-2. A filing and its lines always come from one data set, so the old lines of `S_X` carry either
-   X or one of the data sets that the current filing rows of `S_X` name (a take-over). That is a
-   handful of keys. Each run writes new files holding one data set only, so Delta can skip most
-   files of a quarter from their `_dataset` min/max. This matters for the latest data sets, which
-   touch up to 100 quarters because of late amendments (measured in S1).
-3. The semi-join keeps only rows whose accession is in `S_X`.
+1. `P_X` comes from the filing table, which is small. It is enough because a holding row is
+   always written in the same quarter as its filing row, and the filing row is written last (see
+   step 6), so the filing table never forgets a quarter that still holds lines.
+2. The semi-join keeps only rows whose accession is in `S_X`.
 
-Filter 2 only makes the read cheaper; filter 3 alone would give the same rows. It has not been
-measured on UAT data yet.
+**A tempting shortcut that was taken out.** The first draft also filtered on `_dataset`, so Delta
+could skip files by their `_dataset` min/max statistics. The code review found the hole: if a run
+dies after the holding `MERGE` and before the filing `MERGE`, the lines say one data set and their
+filing row another, and a later take-over by a third data set would never read those lines. Some
+would stay forever with no filing. The test
+`test_lines_left_by_a_crash_between_the_two_merges_are_repaired_later` builds exactly that case.
+Correct first; if reading whole quarters turns out slow on UAT (the latest data sets touch up to
+100 quarters because of late amendments, measured in S1), S4 is where to make it faster.
 
 ### 6. Writes: holdings first
 
@@ -285,7 +285,8 @@ On the holding table, every read filters on `P_X`:
   spec says "whole table"; on 200 M rows that is a big shuffle per data set, and this run can
   only have written keys of `S_X`. The whole-table query is part of acceptance (AC13).
 - **SDQ3**: conservation, as above.
-- **SDQ7**: every holding row of X has a filing row with the same accession, quarter and data set.
+- **SDQ7**: every holding row of X (`_dataset = X`) has a filing row with the same accession,
+  quarter and data set.
 - **SDQ13** (warn): lines with `cusip_format_ok = false`.
 - **SDQ11** (warn, filing and holding): keys of X that another data set also holds, and how many
   of those copies differ. `duplicate_copies` first asks Bronze SUBMISSION which other data sets
@@ -295,7 +296,7 @@ On the holding table, every read filters on `P_X`:
   often the copies disagree.
 
 The holding materialization records `inserted`, `updated`, `deleted`, `quarantined`,
-`superseded` and `datasets_read` (the `_dataset` values filter 2 used). The quarantine's
+and `superseded`. The quarantine's
 `reasons` metadata is now keyed by table and code, such as `infotable:NO_FILING`.
 
 ## Safety nets
@@ -306,10 +307,10 @@ The holding materialization records `inserted`, `updated`, `deleted`, `quarantin
 | A line without a filing (no unit, no quarter) | cascade to quarantine as `NO_FILING`; SDQ7 after writing |
 | An overflowing or signed number | digit regex before the cast, `BAD_INTEGER` |
 | A bad filing with many lines quietly dropping data | SDQ3 counts every line; SDQ6 blocks above 1% |
-| A crash between the two `MERGE`s | holdings first, so the rerun still finds the old quarters |
+| A crash between the two `MERGE`s | holdings first, so later runs still find the old quarters and lines (tested) |
 | Two copies of a filing in two zips | the owner rule picks the latest; SDQ11 counts copies that differ |
 | An odd CUSIP | kept and flagged (`cusip_format_ok`), counted by SDQ13 |
-| Reading the whole holding table every run | quarter pruning, `_dataset` data skipping, semi-join |
+| Reading the whole holding table every run | quarter pruning to `P_X`, then a semi-join on `S_X` |
 
 ## Tests
 
@@ -331,7 +332,8 @@ filing by default (`line(...)` and the `lines=` argument of `bronze_rows` add mo
   moved to another quarter moves its lines too.
 - Duplicates: a shared accession ends with the latest data set's lines in both run orders; SDQ11
   counts the differing copies, and identical copies are shared but not differing; a later take-over
-  rewrites the lines' `_dataset`.
+  rewrites the lines' `_dataset`; lines left behind by a run that died between the two `MERGE`s
+  are found and replaced by a later take-over.
 - AC16: every Silver table declares its checks with the spec's blocking flags.
 
 ## Glossary
@@ -341,7 +343,6 @@ filing by default (`line(...)` and the `lines=` argument of `bronze_rows` add mo
 | Broadcast join | Spark copies the small side of a join to every worker, so the big side is not shuffled |
 | Cascade | A quarantined filing sends all its holding lines to quarantine |
 | CUSIP / CINS | 9-character security id; CINS is the foreign variant, starting with a letter |
-| Data skipping | Delta skips files whose column min/max can't match a filter |
 | `infotable_sk` | SEC's id of one holding line inside a filing |
 | `P_X` | The quarters data set X may touch: its filings' quarters plus those of the rows it replaces |
 | `S_X` | The accessions data set X is responsible for: those it owns plus those Silver says came from it |

@@ -21,6 +21,7 @@ this asset in a later slice.
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from functools import reduce
 from typing import Any
 
 from dagster import (
@@ -216,7 +217,9 @@ def duplicate_copies(bronze: dict[str, Any], mine: dict[str, Any], key: str) -> 
     )  # data set keys, at most one per partition
     if not datasets:
         return {}
-    shared = others.select("accession_number").distinct()
+    # Tiny by construction, but Spark has no size estimate for an aggregate: broadcast it, so
+    # the semi-joins below never shuffle whole Bronze partitions.
+    shared = F.broadcast(others.select("accession_number").distinct())
     datasets.append(key)
     per_table = [
         content_copies(
@@ -225,9 +228,7 @@ def duplicate_copies(bronze: dict[str, Any], mine: dict[str, Any], key: str) -> 
         for name in FILING_SOURCES
     ]
     filing = (
-        per_table[0]
-        .unionByName(per_table[1])
-        .unionByName(per_table[2])
+        reduce(lambda a, b: a.unionByName(b), per_table)
         .groupBy("accession_number", "_dataset")
         .agg(F.concat_ws("|", F.array_sort(F.collect_list("_content"))).alias("_content"))
     )
@@ -378,17 +379,11 @@ def silver_form13f(
             .distinct()
             .collect()
         )
-        # A filing and its lines always come from one data set (SDQ7), so the current holding
-        # rows of S_X carry this data set or one the current filing rows name: a handful of
-        # keys, which let Delta skip files by their `_dataset` min/max statistics.
-        datasets_in_scope = sorted(
-            {key} | {r["_dataset"] for r in current_filings.select("_dataset").distinct().collect()}
-        )
+        # No filter on `_dataset` here: a run that died between the holding and the filing
+        # MERGE leaves lines whose `_dataset` differs from their filing's, and a later run
+        # must still find them (code review of S2).
         current_holdings = (
-            silver_holdings.where(
-                F.col("period_of_report").isin(*periods)
-                & F.col("_dataset").isin(*datasets_in_scope)
-            )
+            silver_holdings.where(F.col("period_of_report").isin(*periods))
             .join(scope, "accession_number", "left_semi")
             .select(*HOLDING_OUTPUT)
         )
@@ -681,7 +676,6 @@ def silver_form13f(
                 "deleted": MetadataValue.int(h_ops.get(DELETE, 0)),
                 "quarantined": MetadataValue.int(h_counts.quarantined),
                 "superseded": MetadataValue.int(h_counts.superseded),
-                "datasets_read": MetadataValue.text(", ".join(datasets_in_scope)),
             },
         )
         yield from pre_holding
