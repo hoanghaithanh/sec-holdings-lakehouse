@@ -1,22 +1,27 @@
-"""Silver layer, slice S1: typed 13F filings and the quarantine table (M2 spec, ADR-005).
+"""Silver layer, slices S1 and S2: typed 13F filings, holdings and quarantine (M2 spec, ADR-005).
 
 One multi-asset handles one Bronze data set per run (one Dagster partition each, as in Bronze):
 
 1. Guard: the Bronze tables it reads hold the data set, all from one Bronze run.
 2. Owner: each accession belongs to the latest data set whose SUBMISSION holds it.
-3. Cast, clean and split the data set's filings into Silver rows and quarantine rows.
-4. Block checks before writing (SDQ4, SDQ6).
-5. Work out the change set against what Silver already holds, and `MERGE` only that.
+3. Cast, clean and split the data set's filings, then its holding lines (which take their
+   filing fields, and the value unit, from the clean filings), into Silver rows and quarantine
+   rows.
+4. Block checks before writing (SDQ4, SDQ5, SDQ6).
+5. Work out the change sets against what Silver already holds, and `MERGE` only those:
+   holdings first, then filings (ADR-005, "Why holdings first").
 6. Replace the data set's quarantine partition.
 7. Checks after writing.
 
-Silver makes no HTTP request and never reads the SEC resource. Holdings (S2) and the effective
-table (S3) join this asset in later slices.
+Silver makes no HTTP request and never reads the SEC resource. The effective table (S3) joins
+this asset in a later slice.
 """
 
 # No `from __future__ import annotations` here: Dagster inspects the context annotation at runtime.
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from functools import reduce
 from typing import Any
 
 from dagster import (
@@ -33,11 +38,15 @@ from dagster import (
 from sec_lakehouse.assets.form13f_bronze import BRONZE_KEYS, read_bronze
 from sec_lakehouse.assets.form13f_silver_checks import (
     FILING_TABLE,
+    HOLDING_TABLE,
     QUARANTINE_TABLE,
+    content_copies,
     dates_and_types,
+    differing_duplicates,
     key_problems,
     silver_check_result,
     silver_check_specs,
+    value_unit_problems,
 )
 from sec_lakehouse.delta_tables import (
     DELETE,
@@ -52,6 +61,7 @@ from sec_lakehouse.delta_tables import (
 )
 from sec_lakehouse.resources import LakehouseStorage, SparkResource
 from sec_lakehouse.sources.form13f.datasets import FORM13F_PARTITIONS
+from sec_lakehouse.sources.form13f.schemas import TABLES
 from sec_lakehouse.sources.form13f.silver_filing import (
     FILING_OUTPUT,
     FILING_SOURCES,
@@ -59,19 +69,30 @@ from sec_lakehouse.sources.form13f.silver_filing import (
     owner_map,
     split_filings,
 )
+from sec_lakehouse.sources.form13f.silver_holding import (
+    HOLDING_OUTPUT,
+    HOLDING_SOURCES,
+    INFOTABLE_COLUMNS,
+    split_holdings,
+)
 from sec_lakehouse.sources.form13f.silver_schemas import (
     FILING,
+    HOLDING,
     QUARANTINE,
     QUARANTINE_BLOCK_RATIO,
     QUARANTINE_BLOCK_RATIO_OVERRIDES,
     filing_schema,
+    holding_schema,
     quarantine_schema,
 )
 
 SILVER_KEYS = {
     FILING_TABLE: AssetKey(["silver", FILING.name]),
+    HOLDING_TABLE: AssetKey(["silver", HOLDING.name]),
     QUARANTINE_TABLE: AssetKey(["silver", QUARANTINE.name]),
 }
+SILVER_SOURCES = FILING_SOURCES + HOLDING_SOURCES
+_SOURCE_COLUMNS = {spec.name: spec.columns for spec in TABLES}
 
 
 class SilverQualityError(RuntimeError):
@@ -93,7 +114,7 @@ def bronze_inputs(session: Any, storage: LakehouseStorage, key: str) -> dict[str
 
     tables: dict[str, Any] = {}
     run_ids: set[str] = set()
-    for name in FILING_SOURCES:
+    for name in SILVER_SOURCES:
         path = storage.table_path("bronze", f"form13f_{name}")
         df = read_bronze(session, path)
         if df is None:
@@ -115,6 +136,112 @@ def bronze_inputs(session: Any, storage: LakehouseStorage, key: str) -> dict[str
     return tables
 
 
+@dataclass(frozen=True)
+class Counts:
+    """Bronze rows of the data set for one Silver table, and how they were split."""
+
+    bronze: int
+    superseded: int
+    quarantined: int
+
+    @property
+    def candidates(self) -> int:
+        """Rows this data set is responsible for: the base of the SDQ6 rate."""
+        return self.bronze - self.superseded
+
+
+def split_counts(bronze: Any, evaluated: Any) -> Counts:
+    from pyspark.sql import functions as F
+
+    kept = ~F.col("superseded")
+    totals = evaluated.agg(
+        F.sum(F.when(F.col("superseded"), 1).otherwise(0)).alias("superseded"),
+        F.sum(F.when(kept & (F.size("reason_codes") > 0), 1).otherwise(0)).alias("quarantined"),
+    ).first()
+    # SDQ3 compares with the Bronze table itself, not the joined frame, so a join that fanned
+    # out could not hide behind its own inflated count.
+    return Counts(
+        bronze=int(bronze.count()),
+        superseded=int(totals["superseded"] or 0),
+        quarantined=int(totals["quarantined"] or 0),
+    )
+
+
+def quarantine_rate(
+    asset_key: AssetKey, key: str, table: str, counts: Counts, noun: str
+) -> AssetCheckResult:
+    """SDQ6: warn above 0 quarantined rows, block above the data set's threshold."""
+    threshold = QUARANTINE_BLOCK_RATIO_OVERRIDES.get(key, QUARANTINE_BLOCK_RATIO)
+    ratio = counts.quarantined / counts.candidates if counts.candidates else 0.0
+    return silver_check_result(
+        "SDQ6",
+        asset_key,
+        key,
+        counts.quarantined,
+        table=table,
+        severity=AssetCheckSeverity.ERROR if ratio > threshold else AssetCheckSeverity.WARN,
+        metrics={
+            f"quarantined_{noun}": counts.quarantined,
+            f"candidate_{noun}": counts.candidates,
+            "quarantine_ratio": round(ratio, 6),
+            "block_above": threshold,
+        },
+    )
+
+
+def blocking_failures(results: list[AssetCheckResult]) -> list[str]:
+    return [
+        f"{r.check_name} on {r.asset_key.path[-1] if r.asset_key else '?'}"
+        for r in results
+        if not r.passed and r.severity == AssetCheckSeverity.ERROR
+    ]
+
+
+def duplicate_copies(bronze: dict[str, Any], mine: dict[str, Any], key: str) -> dict[str, Any]:
+    """Raw-content hashes of the accessions this data set shares with others, for SDQ11.
+
+    Returns `{}` when no other data set holds any of its accessions (the usual case), so the
+    check costs one small read of Bronze SUBMISSION. Otherwise the Bronze reads prune to the
+    data sets that share an accession.
+    """
+    from pyspark.sql import functions as F
+
+    others = (
+        bronze["submission"]
+        .where(F.col("_dataset") != key)
+        .select("accession_number", "_dataset")
+        .join(mine["submission"].select("accession_number"), "accession_number", "left_semi")
+    )
+    datasets = sorted(
+        r["_dataset"] for r in others.select("_dataset").distinct().collect()
+    )  # data set keys, at most one per partition
+    if not datasets:
+        return {}
+    # Tiny by construction, but Spark has no size estimate for an aggregate: broadcast it, so
+    # the semi-joins below never shuffle whole Bronze partitions.
+    shared = F.broadcast(others.select("accession_number").distinct())
+    datasets.append(key)
+    per_table = [
+        content_copies(
+            bronze[name], shared, datasets, ("accession_number",), _SOURCE_COLUMNS[name]
+        ).withColumn("_content", F.concat(F.lit(f"{name}:"), "_content"))
+        for name in FILING_SOURCES
+    ]
+    filing = (
+        reduce(lambda a, b: a.unionByName(b), per_table)
+        .groupBy("accession_number", "_dataset")
+        .agg(F.concat_ws("|", F.array_sort(F.collect_list("_content"))).alias("_content"))
+    )
+    holding = content_copies(
+        bronze["infotable"],
+        shared,
+        datasets,
+        ("accession_number", "infotable_sk"),
+        INFOTABLE_COLUMNS,
+    )
+    return {FILING_TABLE: filing, HOLDING_TABLE: holding}
+
+
 @multi_asset(
     specs=[
         AssetSpec(
@@ -126,8 +253,16 @@ def bronze_inputs(session: Any, storage: LakehouseStorage, key: str) -> dict[str
             "Delta-partitioned by period_of_report.",
         ),
         AssetSpec(
+            SILVER_KEYS[HOLDING_TABLE],
+            deps=[BRONZE_KEYS[name] for name in SILVER_SOURCES],
+            partitions_def=FORM13F_PARTITIONS,
+            group_name="form13f_silver",
+            description="One typed row per 13F holding line (INFOTABLE), with the filing's "
+            "fields and value_usd in dollars. Delta-partitioned by period_of_report.",
+        ),
+        AssetSpec(
             SILVER_KEYS[QUARANTINE_TABLE],
-            deps=[BRONZE_KEYS[name] for name in FILING_SOURCES],
+            deps=[BRONZE_KEYS[name] for name in SILVER_SOURCES],
             partitions_def=FORM13F_PARTITIONS,
             group_name="form13f_silver",
             description="Bronze rows that failed a Silver rule, with reason codes and the raw "
@@ -144,7 +279,7 @@ def bronze_inputs(session: Any, storage: LakehouseStorage, key: str) -> dict[str
 def silver_form13f(
     context: AssetExecutionContext, spark: SparkResource, storage: LakehouseStorage
 ) -> Iterator[MaterializeResult[None] | AssetCheckResult]:
-    """Refresh Silver filings and quarantine for one data set; re-runnable (ADR-005)."""
+    """Refresh Silver filings, holdings and quarantine for one data set; re-runnable (ADR-005)."""
     from pyspark import StorageLevel
     from pyspark.sql import functions as F
 
@@ -152,61 +287,55 @@ def silver_form13f(
     run_id = context.run.run_id
     processed_at = datetime.now(UTC)
     session: Any = spark.get_session()
-    filing_key, quarantine_key = SILVER_KEYS[FILING_TABLE], SILVER_KEYS[QUARANTINE_TABLE]
+    filing_key = SILVER_KEYS[FILING_TABLE]
+    holding_key = SILVER_KEYS[HOLDING_TABLE]
+    quarantine_key = SILVER_KEYS[QUARANTINE_TABLE]
 
     bronze = bronze_inputs(session, storage, key)
     mine = {name: df.where(F.col("_dataset") == key) for name, df in bronze.items()}
     owners = owner_map(bronze["submission"]).persist(StorageLevel.MEMORY_AND_DISK)
-    split = split_filings(mine["submission"], mine["coverpage"], mine["summarypage"], owners, key)
-    evaluated = split.evaluated.persist(StorageLevel.MEMORY_AND_DISK)
-    cached = [owners, evaluated]
+    fsplit = split_filings(mine["submission"], mine["coverpage"], mine["summarypage"], owners, key)
+    f_evaluated = fsplit.evaluated.persist(StorageLevel.MEMORY_AND_DISK)
+    hsplit = split_holdings(mine["infotable"], fsplit.good, owners, key)
+    h_evaluated = hsplit.evaluated.persist(StorageLevel.MEMORY_AND_DISK)
+    cached = [owners, f_evaluated, h_evaluated]
     try:
-        kept = ~F.col("superseded")
-        bad = F.size("reason_codes") > 0
-        totals = evaluated.agg(
-            F.sum(F.when(F.col("superseded"), 1).otherwise(0)).alias("superseded"),
-            F.sum(F.when(kept & bad, 1).otherwise(0)).alias("quarantined"),
-        ).first()
-        # SDQ3 compares with the Bronze table itself, not the joined frame, so a join that
-        # fanned out could not hide behind its own inflated count.
-        bronze_rows = int(mine["submission"].count())
-        superseded = int(totals["superseded"] or 0)
-        quarantined = int(totals["quarantined"] or 0)
+        f_counts = split_counts(mine["submission"], f_evaluated)
+        h_counts = split_counts(mine["infotable"], h_evaluated)
 
         # --- block checks before any write ------------------------------------------------
-        run_date = processed_at.date()
-        sdq4 = dates_and_types(split.good, filing_schema(), run_date)
-        threshold = QUARANTINE_BLOCK_RATIO_OVERRIDES.get(key, QUARANTINE_BLOCK_RATIO)
-        candidates = bronze_rows - superseded
-        ratio = quarantined / candidates if candidates else 0.0
-        pre_checks = [
+        sdq4 = dates_and_types(fsplit.good, filing_schema(), processed_at.date())
+        f_sdq5 = value_unit_problems(
+            fsplit.good, (("table_value_total_reported", "table_value_total_usd"),)
+        )
+        h_sdq5 = value_unit_problems(hsplit.good, (("value_reported", "value_usd"),))
+        pre_filing = [
             silver_check_result(
                 "SDQ4", filing_key, key, sum(sdq4.values()), table=FILING_TABLE, metrics=sdq4
             ),
             silver_check_result(
-                "SDQ6",
-                filing_key,
-                key,
-                quarantined,
-                table=FILING_TABLE,
-                severity=AssetCheckSeverity.ERROR if ratio > threshold else AssetCheckSeverity.WARN,
-                metrics={
-                    "quarantined_filings": quarantined,
-                    "candidate_filings": candidates,
-                    "quarantine_ratio": round(ratio, 6),
-                    "block_above": threshold,
-                },
+                "SDQ5", filing_key, key, sum(f_sdq5.values()), table=FILING_TABLE, metrics=f_sdq5
             ),
+            quarantine_rate(filing_key, key, FILING_TABLE, f_counts, "filings"),
         ]
-        blocked = [
-            str(r.check_name)
-            for r in pre_checks
-            if not r.passed and r.severity == AssetCheckSeverity.ERROR
+        pre_holding = [
+            silver_check_result(
+                "SDQ5",
+                holding_key,
+                key,
+                sum(h_sdq5.values()),
+                table=HOLDING_TABLE,
+                metrics=h_sdq5,
+            ),
+            quarantine_rate(holding_key, key, HOLDING_TABLE, h_counts, "holdings"),
         ]
+        blocked = blocking_failures(pre_filing + pre_holding)
         if blocked:
-            yield from pre_checks
+            yield from pre_filing
+            yield from pre_holding
             top = (
-                evaluated.where(kept & bad)
+                fsplit.quarantine.select("reason_codes")
+                .unionByName(hsplit.quarantine.select("reason_codes"))
                 .select(F.explode("reason_codes").alias("code"))
                 .groupBy("code")
                 .count()
@@ -220,47 +349,69 @@ def silver_form13f(
                 + (f" (top reasons: {top_reasons})" if top_reasons else "")
             )
 
-        # --- change set -------------------------------------------------------------------
+        # --- change sets ------------------------------------------------------------------
         filing_path = storage.table_path("silver", FILING.name)
+        holding_path = storage.table_path("silver", HOLDING.name)
         quarantine_path = storage.table_path("silver", QUARANTINE.name)
         ensure_table(session, filing_path, filing_schema(), FILING.partition_by)
+        ensure_table(session, holding_path, holding_schema(), HOLDING.partition_by)
         ensure_table(session, quarantine_path, quarantine_schema(), QUARANTINE.partition_by)
-        silver = session.read.format("delta").load(filing_path)
+        silver_filings = session.read.format("delta").load(filing_path)
+        silver_holdings = session.read.format("delta").load(holding_path)
 
         # S_X: accessions this data set owns, plus those Silver says came from it.
         scope = (
-            evaluated.where(F.col("owner") == key)
+            f_evaluated.where(F.col("owner") == key)
             .select("accession_number")
-            .unionByName(silver.where(F.col("_dataset") == key).select("accession_number"))
+            .unionByName(silver_filings.where(F.col("_dataset") == key).select("accession_number"))
             .distinct()
         )
-        current = silver.join(scope, "accession_number", "left_semi").select(*FILING_OUTPUT)
-        # P_X: quarter ends that passed BAD_PERIOD, so at most about 150 dates.
-        periods = sorted(
+        current_filings = silver_filings.join(scope, "accession_number", "left_semi").select(
+            *FILING_OUTPUT
+        )
+        # P_X: quarter ends that passed BAD_PERIOD, so at most about 150 dates. Every Silver
+        # holding row has a Silver filing row with the same accession and period (SDQ7), so the
+        # filing table alone says which quarters may hold rows of S_X.
+        periods: list[date] = sorted(
             row["period_of_report"]
-            for row in split.good.select("period_of_report")
-            .unionByName(current.select("period_of_report"))
+            for row in fsplit.good.select("period_of_report")
+            .unionByName(current_filings.select("period_of_report"))
             .distinct()
             .collect()
         )
-        changes = (
-            change_set(split.good, current, FILING.keys, FILING_OUTPUT)
-            .withColumn("_silver_processed_at", F.lit(processed_at).cast("timestamp"))
-            .withColumn("_silver_run_id", F.lit(run_id))
-            .persist(StorageLevel.MEMORY_AND_DISK)
+        # No filter on `_dataset` here: a run that died between the holding and the filing
+        # MERGE leaves lines whose `_dataset` differs from their filing's, and a later run
+        # must still find them (code review of S2).
+        current_holdings = (
+            silver_holdings.where(F.col("period_of_report").isin(*periods))
+            .join(scope, "accession_number", "left_semi")
+            .select(*HOLDING_OUTPUT)
         )
-        cached.append(changes)
-        ops = {r[OP]: int(r["count"]) for r in changes.groupBy(OP).count().collect()}  # <= 3 rows
+
+        def changes_of(new: Any, old: Any, keys: tuple[str, ...], columns: list[str]) -> Any:
+            df = (
+                change_set(new, old, keys, columns)
+                .withColumn("_silver_processed_at", F.lit(processed_at).cast("timestamp"))
+                .withColumn("_silver_run_id", F.lit(run_id))
+                .persist(StorageLevel.MEMORY_AND_DISK)
+            )
+            cached.append(df)
+            return df
+
+        f_changes = changes_of(fsplit.good, current_filings, FILING.keys, FILING_OUTPUT)
+        h_changes = changes_of(hsplit.good, current_holdings, HOLDING.keys, HOLDING_OUTPUT)
+        f_ops = {r[OP]: int(r["count"]) for r in f_changes.groupBy(OP).count().collect()}
+        h_ops = {r[OP]: int(r["count"]) for r in h_changes.groupBy(OP).count().collect()}
         taken_over_from = sorted(
             r[OLD_DATASET]
-            for r in changes.where((F.col(OP) == UPDATE) & (F.col(OLD_DATASET) != key))
+            for r in f_changes.where((F.col(OP) == UPDATE) & (F.col(OLD_DATASET) != key))
             .select(OLD_DATASET)
             .distinct()
             .collect()
         )  # data set keys, at most one per partition
         handed_back_to = sorted(
             str(r["owner"] or "none (gone from Bronze)")
-            for r in changes.where(F.col(OP) == DELETE)
+            for r in f_changes.where(F.col(OP) == DELETE)
             .join(owners, "accession_number", "left")
             .where(F.coalesce(F.col("owner"), F.lit("")) != key)
             .select("owner")
@@ -268,38 +419,56 @@ def silver_form13f(
             .collect()
         )
 
-        # --- writes -----------------------------------------------------------------------
-        if ops:
+        # --- writes: holdings, then filings, then quarantine ------------------------------
+        if h_ops:
             merge_change_set(
-                session, filing_path, changes, FILING.keys, FILING.partition_by, periods
+                session, holding_path, h_changes, HOLDING.keys, HOLDING.partition_by, periods
+            )
+        if f_ops:
+            merge_change_set(
+                session, filing_path, f_changes, FILING.keys, FILING.partition_by, periods
             )
         replace_partition(
-            split.quarantine.withColumn(
-                "_silver_processed_at", F.lit(processed_at).cast("timestamp")
-            ).withColumn("_silver_run_id", F.lit(run_id)),
+            fsplit.quarantine.unionByName(hsplit.quarantine)
+            .withColumn("_silver_processed_at", F.lit(processed_at).cast("timestamp"))
+            .withColumn("_silver_run_id", F.lit(run_id)),
             quarantine_path,
             QUARANTINE.partition_by,
             key,
         )
         context.log.info(
-            "%s: filings inserted %d, updated %d, deleted %d; quarantined %d; superseded %d",
+            "%s: filings inserted %d, updated %d, deleted %d, quarantined %d, superseded %d; "
+            "holdings inserted %d, updated %d, deleted %d, quarantined %d, superseded %d",
             key,
-            ops.get(INSERT, 0),
-            ops.get(UPDATE, 0),
-            ops.get(DELETE, 0),
-            quarantined,
-            superseded,
+            f_ops.get(INSERT, 0),
+            f_ops.get(UPDATE, 0),
+            f_ops.get(DELETE, 0),
+            f_counts.quarantined,
+            f_counts.superseded,
+            h_ops.get(INSERT, 0),
+            h_ops.get(UPDATE, 0),
+            h_ops.get(DELETE, 0),
+            h_counts.quarantined,
+            h_counts.superseded,
         )
 
         # --- checks after writing ---------------------------------------------------------
         filings = session.read.format("delta").load(filing_path)
+        holdings = (
+            session.read.format("delta")
+            .load(holding_path)
+            .where(F.col("period_of_report").isin(*periods))
+        )  # prunes to P_X: every holding row this run may have touched is there
+        my_holdings = holdings.where(F.col("_dataset") == key)
         quarantine = (
             session.read.format("delta").load(quarantine_path).where(F.col("_dataset") == key)
         )
-        silver_rows = filings.where(F.col("_dataset") == key).count()
-        quarantine_counts = quarantine.agg(
+        silver_filing_rows = filings.where(F.col("_dataset") == key).count()
+        silver_holding_rows = my_holdings.count()
+        q = quarantine.agg(
             F.count(F.lit(1)).alias("rows"),
             F.sum(F.when(F.col("source_table") == "submission", 1).otherwise(0)).alias("filings"),
+            F.sum(F.when(F.col("source_table") == "infotable", 1).otherwise(0)).alias("holdings"),
             F.sum(
                 F.when(
                     F.col("reason_codes").isNull()
@@ -309,34 +478,55 @@ def silver_form13f(
                 ).otherwise(0)
             ).alias("incomplete"),
         ).first()
-        quarantine_rows = int(quarantine_counts["rows"])
-        quarantined_written = int(quarantine_counts["filings"] or 0)
-        incomplete = int(quarantine_counts["incomplete"] or 0)
+        quarantine_rows = int(q["rows"])
+        q_filings, q_holdings = int(q["filings"] or 0), int(q["holdings"] or 0)
+        incomplete = int(q["incomplete"] or 0)
         filing_keys = key_problems(filings, FILING.keys)
+        holding_keys = key_problems(
+            holdings.join(scope, "accession_number", "left_semi"), HOLDING.keys
+        )
         quarantine_keys = key_problems(quarantine, QUARANTINE.keys)
         missing_in_bronze = (
             filings.where(F.col("_dataset") == key)
             .join(mine["submission"], "accession_number", "left_anti")
             .count()
         )
-        unbalanced = bronze_rows - (silver_rows + quarantined_written + superseded)
-        warn_counts = filing_warn_counts(evaluated)
+        joined_on = ["accession_number", "period_of_report", "_dataset"]
+        holdings_without_filing = my_holdings.join(
+            filings.select(*joined_on), joined_on, "left_anti"
+        ).count()
+        f_unbalanced = f_counts.bronze - (silver_filing_rows + q_filings + f_counts.superseded)
+        h_unbalanced = h_counts.bronze - (silver_holding_rows + q_holdings + h_counts.superseded)
+        warn_counts = filing_warn_counts(f_evaluated)
+        copies = duplicate_copies(bronze, mine, key)
+        no_shared = {"shared_keys": 0, "differing_keys": 0}
+        f_dupes = (
+            differing_duplicates(copies[FILING_TABLE], ("accession_number",), key)
+            if copies
+            else no_shared
+        )
+        h_dupes = (
+            differing_duplicates(copies[HOLDING_TABLE], ("accession_number", "infotable_sk"), key)
+            if copies
+            else no_shared
+        )
+        bad_cusips = hsplit.good.where(~F.col("cusip_format_ok")).count()
         reasons = {
-            r["code"]: int(r["count"])
-            for r in quarantine.select(F.explode("reason_codes").alias("code"))
-            .groupBy("code")
+            f"{r['source_table']}:{r['code']}": int(r["count"])
+            for r in quarantine.select("source_table", F.explode("reason_codes").alias("code"))
+            .groupBy("source_table", "code")
             .count()
             .collect()
-        }  # one row per reason code, at most 5
+        }  # one row per table and reason code, a dozen at most
 
         post_filing = [
             silver_check_result(
                 "SDQ1",
                 filing_key,
                 key,
-                int(silver_rows == 0),
+                int(silver_filing_rows == 0),
                 table=FILING_TABLE,
-                metrics={"rows": silver_rows},
+                metrics={"rows": silver_filing_rows},
             ),
             silver_check_result(
                 "SDQ2",
@@ -350,13 +540,13 @@ def silver_form13f(
                 "SDQ3",
                 filing_key,
                 key,
-                abs(unbalanced),
+                abs(f_unbalanced),
                 table=FILING_TABLE,
                 metrics={
-                    "bronze_rows": bronze_rows,
-                    "silver_rows": silver_rows,
-                    "quarantined": quarantined_written,
-                    "superseded": superseded,
+                    "bronze_rows": f_counts.bronze,
+                    "silver_rows": silver_filing_rows,
+                    "quarantined": q_filings,
+                    "superseded": f_counts.superseded,
                 },
             ),
             silver_check_result(
@@ -374,6 +564,69 @@ def silver_form13f(
                 sum(warn_counts.values()),
                 table=FILING_TABLE,
                 metrics=warn_counts,
+            ),
+            silver_check_result(
+                "SDQ11",
+                filing_key,
+                key,
+                f_dupes["differing_keys"],
+                table=FILING_TABLE,
+                metrics=f_dupes,
+            ),
+        ]
+        post_holding = [
+            silver_check_result(
+                "SDQ1",
+                holding_key,
+                key,
+                int(silver_holding_rows == 0),
+                table=HOLDING_TABLE,
+                metrics={"rows": silver_holding_rows},
+            ),
+            silver_check_result(
+                "SDQ2",
+                holding_key,
+                key,
+                sum(holding_keys.values()),
+                table=HOLDING_TABLE,
+                metrics=holding_keys,
+            ),
+            silver_check_result(
+                "SDQ3",
+                holding_key,
+                key,
+                abs(h_unbalanced),
+                table=HOLDING_TABLE,
+                metrics={
+                    "bronze_rows": h_counts.bronze,
+                    "silver_rows": silver_holding_rows,
+                    "quarantined": q_holdings,
+                    "superseded": h_counts.superseded,
+                },
+            ),
+            silver_check_result(
+                "SDQ7",
+                holding_key,
+                key,
+                holdings_without_filing,
+                table=HOLDING_TABLE,
+                metrics={"without_filing": holdings_without_filing},
+            ),
+            silver_check_result(
+                "SDQ11",
+                holding_key,
+                key,
+                h_dupes["differing_keys"],
+                table=HOLDING_TABLE,
+                metrics=h_dupes,
+            ),
+            silver_check_result(
+                "SDQ13",
+                holding_key,
+                key,
+                bad_cusips,
+                table=HOLDING_TABLE,
+                metrics={"cusip_format_not_ok": bad_cusips},
             ),
         ]
         post_quarantine = [
@@ -399,20 +652,34 @@ def silver_form13f(
             asset_key=filing_key,
             metadata={
                 "path": MetadataValue.path(filing_path),
-                "rows_for_dataset": MetadataValue.int(silver_rows),
-                "inserted": MetadataValue.int(ops.get(INSERT, 0)),
-                "updated": MetadataValue.int(ops.get(UPDATE, 0)),
-                "deleted": MetadataValue.int(ops.get(DELETE, 0)),
-                "quarantined": MetadataValue.int(quarantined),
-                "superseded": MetadataValue.int(superseded),
+                "rows_for_dataset": MetadataValue.int(silver_filing_rows),
+                "inserted": MetadataValue.int(f_ops.get(INSERT, 0)),
+                "updated": MetadataValue.int(f_ops.get(UPDATE, 0)),
+                "deleted": MetadataValue.int(f_ops.get(DELETE, 0)),
+                "quarantined": MetadataValue.int(f_counts.quarantined),
+                "superseded": MetadataValue.int(f_counts.superseded),
                 "periods_touched": MetadataValue.int(len(periods)),
                 "periods": MetadataValue.text(", ".join(p.isoformat() for p in periods) or "none"),
                 "taken_over_from": MetadataValue.text(", ".join(taken_over_from) or "none"),
                 "handed_back_to": MetadataValue.text(", ".join(handed_back_to) or "none"),
             },
         )
-        yield from pre_checks
+        yield from pre_filing
         yield from post_filing
+        yield MaterializeResult(
+            asset_key=holding_key,
+            metadata={
+                "path": MetadataValue.path(holding_path),
+                "rows_for_dataset": MetadataValue.int(silver_holding_rows),
+                "inserted": MetadataValue.int(h_ops.get(INSERT, 0)),
+                "updated": MetadataValue.int(h_ops.get(UPDATE, 0)),
+                "deleted": MetadataValue.int(h_ops.get(DELETE, 0)),
+                "quarantined": MetadataValue.int(h_counts.quarantined),
+                "superseded": MetadataValue.int(h_counts.superseded),
+            },
+        )
+        yield from pre_holding
+        yield from post_holding
         yield MaterializeResult(
             asset_key=quarantine_key,
             metadata={
@@ -423,12 +690,7 @@ def silver_form13f(
         )
         yield from post_quarantine
 
-        failed = sorted(
-            f"{r.check_name} on {table}"
-            for table, results in ((FILING.name, post_filing), (QUARANTINE.name, post_quarantine))
-            for r in results
-            if not r.passed and r.severity == AssetCheckSeverity.ERROR
-        )
+        failed = sorted(blocking_failures(post_filing + post_holding + post_quarantine))
         if failed:
             raise SilverQualityError(
                 f"{key}: blocking checks failed after writing: {', '.join(failed)}. "

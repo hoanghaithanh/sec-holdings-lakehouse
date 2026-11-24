@@ -24,5 +24,5 @@ form13f_bronze_job = define_asset_job(
 form13f_silver_job = define_asset_job(
     "form13f_silver_job",
     selection=AssetSelection.assets(*SILVER_KEYS.values()),
-    description="Refresh the Silver 13F filing and quarantine tables for one data set.",
+    description="Refresh the Silver 13F filing, holding and quarantine tables for one data set.",
 )
